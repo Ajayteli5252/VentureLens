@@ -1,6 +1,7 @@
 crewai
 crewai-tools
 python-dotenv==1.0.1
-streamlit==1.39.0
 cerebras-cloud-sdk
 requests
+fastapi
+uvicorn[standard]

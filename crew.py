@@ -1,6 +1,6 @@
 """
 Assembles the 7-agent crew and exposes a single run_validation() function
-that app.py (Streamlit) calls.
+that api.py and frontend call.
 
 Includes robust retry logic with exponential back-off so that transient
 Groq errors (output_parse_failed, 429 rate-limit, 503 overloaded) do not
@@ -18,6 +18,16 @@ from agents import (
 from tasks import build_tasks
 
 logger = logging.getLogger(__name__)
+
+AGENT_STAGE_MAP = {
+    "Startup Validation Coordinator": ("coordinator", "Coordinator Agent"),
+    "Market Research Analyst": ("research", "Market Research Agent"),
+    "Competitor Analysis Specialist": ("research", "Competitor Analysis Agent"),
+    "Financial Feasibility Analyst": ("research", "Financial Feasibility Agent"),
+    "Risk Assessment Analyst": ("research", "Risk Assessment Agent"),
+    "Cross-Verification and Debate Agent": ("debate", "Comparator / Debate Agent"),
+    "Investor Verdict Agent": ("verdict", "Investor-Verdict Agent"),
+}
 
 # ---- Retry configuration ----
 MAX_RETRIES = 4          # total attempts = 1 original + 4 retries
@@ -38,6 +48,9 @@ RETRYABLE_ERRORS = [
     "All fallback attempts failed",
     "no running event loop",
     "Parsing failed",
+    "502",
+    "bad gateway",
+    "failed to parse tool call arguments",
 ]
 
 
@@ -47,14 +60,73 @@ def _is_retryable(error: Exception) -> bool:
     return any(keyword.lower() in msg for keyword in RETRYABLE_ERRORS)
 
 
-def run_validation(idea: str) -> str:
-    """Run the full multi-agent validation with automatic retries.
+def _wrap_agent_execution(agent, event_emitter):
+    """Add non-invasive execution hooks without changing the actual pipeline."""
+    if event_emitter is None:
+        return
 
-    If the crew fails due to a transient error (parsing, rate-limit, etc.),
-    the function waits with exponential back-off and retries. Non-retryable
-    errors (auth failures, missing API keys) are raised immediately.
+    agent_cls = type(agent)
+    if getattr(agent_cls, "_venturLens_wrapped", False):
+        return
+
+    original_execute_task = agent_cls.execute_task
+
+    def wrapped_execute_task(self, task, context=None, tools=None):
+        stage_key, agent_name = AGENT_STAGE_MAP.get(getattr(self, "role", ""), (None, getattr(self, "role", "Agent")))
+        if stage_key:
+            event_emitter({
+                "type": "agent_started",
+                "stage": stage_key,
+                "agent": agent_name,
+                "message": "Understanding your startup idea and assigning research tasks..." if stage_key == "coordinator" else "Analyzing startup idea and gathering evidence...",
+            })
+        try:
+            result = original_execute_task(self, task, context=context, tools=tools)
+            if stage_key:
+                event_emitter({
+                    "type": "agent_completed",
+                    "stage": stage_key,
+                    "agent": agent_name,
+                })
+            return result
+        except Exception:
+            if stage_key:
+                event_emitter({
+                    "type": "agent_error",
+                    "stage": stage_key,
+                    "agent": agent_name,
+                    "message": "Agent execution failed.",
+                })
+            raise
+
+    agent_cls.execute_task = wrapped_execute_task
+    agent_cls._venturLens_wrapped = True
+
+
+def run_validation_pipeline(idea: str, event_emitter=None) -> tuple[str, dict[str, str]]:
+    """Run the full multi-agent validation with automatic retries and returns
+
+    (raw_result, agent_outputs_dict).
     """
+    print(
+        "[VALIDATION]\nCoordinator\nMarket Agent\nCompetitor Agent\nFinancial Agent\nRisk Agent\nComparator/Debate\nInvestor-Verdict\n"
+    )
+    logger.info(
+        "[VALIDATION]\nCoordinator\nMarket Agent\nCompetitor Agent\nFinancial Agent\nRisk Agent\nComparator/Debate\nInvestor-Verdict"
+    )
+
     last_exception = None
+
+    if event_emitter:
+        event_emitter({
+            "type": "pipeline_started",
+            "stage": "coordinator",
+            "agent": "Coordinator Agent",
+            "message": "Understanding your startup idea and assigning research tasks...",
+        })
+
+        for agent in [coordinator, market_agent, competitor_agent, financial_agent, risk_agent, comparator_agent, verdict_agent]:
+            _wrap_agent_execution(agent, event_emitter)
 
     for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt 1 is the original
         try:
@@ -73,7 +145,16 @@ def run_validation(idea: str) -> str:
             )
 
             result = crew.kickoff(inputs={"idea": idea})
-            return str(result)
+
+            # Extract individual task outputs for follow-up context
+            agent_outputs = {}
+            if hasattr(result, "tasks_output") and result.tasks_output:
+                keys = ["market", "competitor", "financial", "risk", "comparator", "verdict"]
+                for i, task_out in enumerate(result.tasks_output):
+                    key = keys[i] if i < len(keys) else f"task_{i}"
+                    agent_outputs[key] = str(getattr(task_out, "raw", "") or "")
+
+            return str(result), agent_outputs
 
         except Exception as e:
             last_exception = e
@@ -98,6 +179,12 @@ def run_validation(idea: str) -> str:
 
     # Should not reach here, but safety net
     raise last_exception  # type: ignore[misc]
+
+
+def run_validation(idea: str) -> str:
+    """Run the full multi-agent validation and return the raw verdict string."""
+    raw_result, _ = run_validation_pipeline(idea)
+    return raw_result
 
 
 if __name__ == "__main__":

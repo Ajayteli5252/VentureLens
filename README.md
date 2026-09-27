@@ -22,14 +22,21 @@ research, a debate/cross-verification step, and a final investor-style verdict.
 
 ## Run
 
-**Quick command-line test:**
-```
-python crew.py
+**1. FastAPI Backend:**
+```bash
+uvicorn api:app --reload --port 8000
 ```
 
-**Full Streamlit demo:**
+**2. React Frontend:**
+```bash
+cd frontend
+npm install
+npm run dev
 ```
-streamlit run app.py
+
+**Quick command-line test:**
+```bash
+python crew.py
 ```
 
 ## Project Structure
@@ -38,28 +45,31 @@ streamlit run app.py
 startup-idea-validator/
 ├── agents.py         # All 7 agent definitions
 ├── tasks.py          # Task descriptions + expected outputs
-├── crew.py           # Assembles the crew, hierarchical process
-├── app.py            # Streamlit UI
+├── crew.py           # Assembles the full 7-agent hierarchical crew
+├── followup.py       # Fast follow-up question router & single-agent executor
+├── api.py            # FastAPI REST API (initial validation + fast follow-ups)
+├── frontend/         # React + Vite web UI
 ├── tools/
 │   └── search_tool.py
 ├── requirements.txt
 └── .env.example
 ```
 
-## Notes on the Free Tier
-
-- `max_rpm=4` is set in `crew.py` to stay under Gemini's free-tier limit of 5 requests/minute.
-  This makes a full run slower (roughly 2-3 minutes) since CrewAI paces its calls — this
-  is expected, not a bug.
-- If you see a `429 RESOURCE_EXHAUSTED` error anyway, wait ~60 seconds before retrying
-  (the free tier's per-minute counter resets every minute).
-
 ## Architecture
 
+**1. Initial Idea Validation (Full 7-Agent Pipeline):**
 ```
 User Idea → Coordinator Agent (manager)
     → Market / Competitor / Financial / Risk agents (parallel research)
     → Comparator/Debate Agent (resolves conflicting findings)
     → Investor-Verdict Agent (final score + Go/No-Go)
-    → Report shown to user
+    → Report & Score displayed to user
+```
+
+**2. Follow-Up Question Flow (Fast Single-Agent Execution):**
+```
+User Follow-up Question
+    → Question Router / Classifier
+    → Selected Specialist Agent ONLY (Market, Competitor, Financial, or Risk)
+    → Direct focused answer with clickable sources (No debate, no verdict re-scoring)
 ```

@@ -1,0 +1,135 @@
+.verdict-card {
+  max-width: 640px;
+  margin: 16px auto;
+  padding: 28px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.verdict-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-light);
+}
+
+.verdict-icon {
+  font-size: 22px;
+}
+
+.verdict-title {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.verdict-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.verdict-score-box,
+.verdict-rec-box {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  text-align: center;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.verdict-score-box:hover,
+.verdict-rec-box:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.verdict-score-label,
+.verdict-rec-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 8px;
+}
+
+.verdict-score-value {
+  font-family: var(--font-serif);
+  font-size: 44px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.verdict-score-max {
+  font-size: 20px;
+  font-weight: 500;
+  opacity: 0.5;
+}
+
+.verdict-pill {
+  display: inline-block;
+  padding: 10px 32px;
+  border-radius: var(--radius-full);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  color: #fff;
+}
+
+.verdict-pill--go {
+  background: var(--success-green);
+  box-shadow: 0 4px 14px rgba(30, 127, 92, 0.3);
+  animation: pulseGlowGreen 2.5s infinite;
+}
+
+.verdict-pill--nogo {
+  background: var(--danger-red);
+  box-shadow: 0 4px 14px rgba(179, 38, 30, 0.3);
+  animation: pulseGlowRed 2.5s infinite;
+}
+
+.verdict-justification {
+  border-left: 4px solid var(--accent-orange);
+  padding: 20px 24px;
+  background: var(--bg-primary);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+}
+
+.verdict-just-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 10px;
+}
+
+.verdict-just-text {
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-line;
+}
+
+@media (max-width: 480px) {
+  .verdict-metrics {
+    grid-template-columns: 1fr;
+  }
+  .verdict-score-value {
+    font-size: 36px;
+  }
+  .verdict-card {
+    margin: 16px;
+    padding: 20px;
+  }
+}

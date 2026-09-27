@@ -1,7 +1,5 @@
 """
-Custom web search tool using Serper's API directly. Avoids a known bug in
-crewai_tools' SerperDevTool where its generated schema includes an
-"additionalProperties" field that Gemini's function-calling API rejects.
+Custom web search tool using Serper's API directly.
 """
 
 import os
@@ -9,10 +7,13 @@ import requests
 from crewai.tools import tool
 
 
-@tool("Web Search")
+@tool("web_search")
 def web_search_tool(query: str) -> str:
     """Searches the web for the given query and returns the top results as text.
-    Use this to find current information, facts, or data relevant to the query."""
+    Use this to find current market data, competitor information, and regulatory facts."""
+    # Safe debug logging (no secrets or keys logged)
+    print(f"\n[TOOL CALL]\nTool: web_search\nArguments: query='{query}'\n")
+
     url = "https://google.serper.dev/search"
     headers = {
         "X-API-KEY": os.getenv("SERPER_API_KEY", ""),
