@@ -60,7 +60,7 @@ def _is_retryable(error: Exception) -> bool:
     return any(keyword.lower() in msg for keyword in RETRYABLE_ERRORS)
 
 
-def _wrap_agent_execution(agent, event_emitter):
+def _wrap_agent_execution(agent, event_emitter, cancel_check=None):
     """Add non-invasive execution hooks without changing the actual pipeline."""
     if event_emitter is None:
         return
@@ -72,6 +72,9 @@ def _wrap_agent_execution(agent, event_emitter):
     original_execute_task = agent_cls.execute_task
 
     def wrapped_execute_task(self, task, context=None, tools=None):
+        # Check cancellation before starting each agent task
+        if cancel_check and cancel_check():
+            raise InterruptedError("Validation cancelled by user.")
         stage_key, agent_name = AGENT_STAGE_MAP.get(getattr(self, "role", ""), (None, getattr(self, "role", "Agent")))
         if stage_key:
             event_emitter({
@@ -80,8 +83,68 @@ def _wrap_agent_execution(agent, event_emitter):
                 "agent": agent_name,
                 "message": "Understanding your startup idea and assigning research tasks..." if stage_key == "coordinator" else "Analyzing startup idea and gathering evidence...",
             })
+            
+        original_step_callback = getattr(self, "step_callback", None)
+        
+        def cancellation_step_callback(step):
+            if cancel_check and cancel_check():
+                raise InterruptedError("Validation cancelled by user.")
+            
+            # Emit real research activity from the agent step
+            try:
+                # 'step' is typically a tuple of (AgentAction, text) or just AgentAction/AgentStep
+                # We do best effort to extract the tool name and input
+                action = step[0] if isinstance(step, tuple) else step
+                
+                if hasattr(action, "tool") and action.tool:
+                    tool_name = str(action.tool).lower()
+                    tool_input = str(getattr(action, "tool_input", ""))
+                    # Truncate input for UI display
+                    if len(tool_input) > 60:
+                        tool_input = tool_input[:60] + "..."
+                        
+                    if "search" in tool_name:
+                        event_emitter({
+                            "type": "agent_activity",
+                            "stage": stage_key,
+                            "agent": agent_name,
+                            "message": f"Searching: {tool_input}"
+                        })
+                    elif "read" in tool_name or "scrape" in tool_name or "webpage" in tool_name:
+                        event_emitter({
+                            "type": "agent_activity",
+                            "stage": stage_key,
+                            "agent": agent_name,
+                            "message": f"Reading source: {tool_input}"
+                        })
+                    else:
+                        event_emitter({
+                            "type": "agent_activity",
+                            "stage": stage_key,
+                            "agent": agent_name,
+                            "message": f"Using tool: {action.tool}"
+                        })
+                elif hasattr(action, "text") and action.text:
+                    event_emitter({
+                        "type": "agent_activity",
+                        "stage": stage_key,
+                        "agent": agent_name,
+                        "message": "Analyzing findings..."
+                    })
+            except Exception:
+                pass
+                
+            if original_step_callback:
+                original_step_callback(step)
+
+        # Apply the callback for this run
+        self.step_callback = cancellation_step_callback
+        
         try:
             result = original_execute_task(self, task, context=context, tools=tools)
+            # Check cancellation after each agent completes too
+            if cancel_check and cancel_check():
+                raise InterruptedError("Validation cancelled by user.")
             if stage_key:
                 event_emitter({
                     "type": "agent_completed",
@@ -89,6 +152,8 @@ def _wrap_agent_execution(agent, event_emitter):
                     "agent": agent_name,
                 })
             return result
+        except InterruptedError:
+            raise
         except Exception:
             if stage_key:
                 event_emitter({
@@ -98,12 +163,14 @@ def _wrap_agent_execution(agent, event_emitter):
                     "message": "Agent execution failed.",
                 })
             raise
+        finally:
+            self.step_callback = original_step_callback
 
     agent_cls.execute_task = wrapped_execute_task
     agent_cls._venturLens_wrapped = True
 
 
-def run_validation_pipeline(idea: str, event_emitter=None) -> tuple[str, dict[str, str]]:
+def run_validation_pipeline(idea: str, event_emitter=None, cancel_check=None) -> tuple[str, dict[str, str]]:
     """Run the full multi-agent validation with automatic retries and returns
 
     (raw_result, agent_outputs_dict).
@@ -126,9 +193,12 @@ def run_validation_pipeline(idea: str, event_emitter=None) -> tuple[str, dict[st
         })
 
         for agent in [coordinator, market_agent, competitor_agent, financial_agent, risk_agent, comparator_agent, verdict_agent]:
-            _wrap_agent_execution(agent, event_emitter)
+            _wrap_agent_execution(agent, event_emitter, cancel_check=cancel_check)
 
     for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt 1 is the original
+        # Check cancellation before each retry attempt
+        if cancel_check and cancel_check():
+            raise InterruptedError("Validation cancelled by user.")
         try:
             tasks = build_tasks(idea)
 

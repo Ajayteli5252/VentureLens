@@ -29,7 +29,7 @@ export default function VerdictCard({ score, recommendation, justification }) {
         <div className="verdict-rec-box">
           <span className="verdict-rec-label">Recommendation</span>
           <div className={`verdict-pill ${pillClass}`}>
-            {isGo ? 'GO' : 'NO-GO'}
+            {isGo ? 'VALIDATE' : 'NOT VALIDATED'}
           </div>
         </div>
       </div>

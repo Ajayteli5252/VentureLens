@@ -2,20 +2,26 @@
   position: sticky;
   top: 0;
   z-index: 100;
-  background: rgba(250, 248, 244, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(250, 248, 244, 0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border-light);
 }
 
 .header-inner {
-  max-width: 960px;
+  max-width: 1120px;
   margin: 0 auto;
   padding: 0 24px;
-  height: 56px;
+  height: 60px;
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 .header-logo {
@@ -24,6 +30,11 @@
   gap: 8px;
   text-decoration: none;
   color: var(--text-primary);
+  transition: opacity var(--transition-fast);
+}
+
+.header-logo:hover {
+  opacity: 0.85;
 }
 
 .header-brand {
@@ -33,10 +44,59 @@
   letter-spacing: -0.3px;
 }
 
-.header-nav {
+.header-breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.breadcrumb-divider {
+  color: var(--border-light);
+  font-weight: 300;
+  font-size: 16px;
+}
+
+.header-session-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  padding: 3px 6px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-light);
+}
+
+.breadcrumb-item {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  transition: all var(--transition-fast);
+}
+
+.breadcrumb-item:hover {
+  color: var(--text-primary);
+  background: var(--bg-primary);
+}
+
+.breadcrumb-item--active {
+  background: var(--accent-orange-light);
+  color: var(--accent-orange);
+  font-weight: 600;
+}
+
+.header-right {
   display: flex;
   align-items: center;
   gap: 24px;
+}
+
+.header-nav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
 }
 
 .header-link {
@@ -51,9 +111,33 @@
   color: var(--accent-orange);
 }
 
-@media (max-width: 480px) {
+.user-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(135deg, #2A2F35 0%, #1A1D20 100%);
+  color: #FFFFFF;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.user-avatar:hover {
+  transform: scale(1.05);
+}
+
+@media (max-width: 768px) {
+  .header-breadcrumbs {
+    display: none;
+  }
   .header-nav {
-    gap: 16px;
+    gap: 14px;
   }
   .header-link {
     font-size: 13px;

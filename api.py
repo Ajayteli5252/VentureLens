@@ -3,7 +3,9 @@ FastAPI wrapper around the VentureLens CrewAI pipeline.
 Exposes:
 1. POST /api/validate - Full 7-agent initial validation pipeline.
 2. POST /api/follow-up - Fast follow-up question routing to ONLY the relevant research agent.
-3. GET /api/session/{session_id} - Retrieve validation session state.
+3. GET  /api/session/{session_id} - Retrieve validation session state.
+4. POST /api/cancel/{session_id} - Cancel a running validation pipeline.
+5. POST /api/cancel-followup/{request_id} - Cancel a running follow-up request.
 
 Run with:  uvicorn api:app --reload --port 8000
 """
@@ -11,6 +13,7 @@ Run with:  uvicorn api:app --reload --port 8000
 import json
 import re
 import uuid
+import time
 import logging
 import queue
 import threading
@@ -31,6 +34,12 @@ logger = logging.getLogger(__name__)
 # In-memory session store: session_id -> session dict
 SESSIONS: dict[str, dict] = {}
 PIPELINE_STREAMS: dict[str, queue.Queue] = {}
+
+# Set of session_ids that the user has requested to cancel
+CANCELLED_SESSIONS: set[str] = set()
+
+# Set of follow-up request_ids that the user has requested to cancel
+CANCELLED_FOLLOWUPS: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +72,7 @@ class FollowUpRequest(BaseModel):
     session_id: str | None = Field(None, description="Existing validation session ID")
     question: str = Field(..., min_length=1, description="Follow-up question or revalidation command")
     idea: str | None = Field(None, description="Fallback startup idea if session_id is omitted")
+    request_id: str | None = Field(None, description="Unique ID for this follow-up request to support cancellation")
 
 
 class FollowUpResponse(BaseModel):
@@ -131,6 +141,11 @@ def emit_pipeline_event(session_id: str, event: dict):
             session["status"] = "error"
 
 
+def _is_cancelled(session_id: str) -> bool:
+    """Check if a session has been cancelled by the user."""
+    return session_id in CANCELLED_SESSIONS
+
+
 def _run_validation_background(session_id: str, idea: str):
     """Execute the full pipeline in the background while exposing an SSE stream."""
     session = SESSIONS.get(session_id)
@@ -139,8 +154,36 @@ def _run_validation_background(session_id: str, idea: str):
 
     session["status"] = "running"
     session["event_log"] = []
+
+    # Wrap the emitter to short-circuit when cancelled
+    def checked_emitter(event):
+        # Emit the event normally
+        emit_pipeline_event(session_id, event)
+
+    # Create a cancellation-aware event emitter
+    def cancellation_aware_emitter(event):
+        if _is_cancelled(session_id):
+            return
+        emit_pipeline_event(session_id, event)
+
     try:
-        raw_result, agent_outputs = run_validation_pipeline(idea, event_emitter=lambda event: emit_pipeline_event(session_id, event))
+        raw_result, agent_outputs = run_validation_pipeline(
+            idea,
+            event_emitter=cancellation_aware_emitter,
+            cancel_check=lambda: _is_cancelled(session_id),
+        )
+
+        # Check if cancelled after pipeline finished
+        if _is_cancelled(session_id):
+            session["status"] = "cancelled"
+            emit_pipeline_event(session_id, {
+                "type": "validation_cancelled",
+                "stage": "report",
+                "reason": "user_requested",
+                "message": "Validation stopped by user.",
+            })
+            return
+
         parsed = _parse_pipeline_output(raw_result)
         session["validation_result"] = {
             "raw": raw_result,
@@ -149,6 +192,22 @@ def _run_validation_background(session_id: str, idea: str):
             "justification": parsed["justification"],
         }
         session["agent_results"] = agent_outputs
+        session["debate_result"] = agent_outputs.get("comparator", "")
+        session["verdict_result"] = agent_outputs.get("verdict", raw_result)
+        if "conversation" not in session or session["conversation"] is None:
+            session["conversation"] = []
+        if not session["conversation"]:
+            session["conversation"].extend([
+                {"role": "user", "content": idea},
+                {
+                    "role": "ai",
+                    "content": parsed["justification"] or raw_result,
+                    "agent": "verdict",
+                    "agent_name": "Investor Verdict Agent",
+                    "agent_icon": "🏆",
+                    "type": "verdict",
+                },
+            ])
         session["result_ready"] = True
         emit_pipeline_event(session_id, {
             "type": "pipeline_completed",
@@ -157,6 +216,15 @@ def _run_validation_background(session_id: str, idea: str):
             "message": "Final validation report is ready.",
         })
     except Exception as exc:
+        if _is_cancelled(session_id):
+            session["status"] = "cancelled"
+            emit_pipeline_event(session_id, {
+                "type": "validation_cancelled",
+                "stage": "report",
+                "reason": "user_requested",
+                "message": "Validation stopped by user.",
+            })
+            return
         logger.exception("Background validation failed for session %s", session_id)
         session["status"] = "error"
         session["error"] = str(exc)
@@ -218,6 +286,7 @@ def start_validation(req: ValidateRequest):
         "event_log": [],
         "agent_results": {},
         "validation_result": {},
+        "conversation": [],
     }
     PIPELINE_STREAMS.setdefault(session_id, queue.Queue())
 
@@ -258,7 +327,40 @@ async def stream_validation_events(session_id: str):
 async def get_session(session_id: str):
     if session_id not in SESSIONS:
         raise HTTPException(status_code=404, detail="Session not found")
-    return SESSIONS[session_id]
+    session = dict(SESSIONS[session_id])
+    # Include cancelled status in response
+    if session_id in CANCELLED_SESSIONS and session.get("status") not in ("completed", "error"):
+        session["status"] = "cancelled"
+    return session
+
+
+@app.post("/api/cancel/{session_id}")
+async def cancel_validation(session_id: str):
+    """Signal the background validation pipeline to stop."""
+    if session_id not in SESSIONS:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session = SESSIONS[session_id]
+    if session.get("status") in ("completed", "error", "cancelled"):
+        return {"status": "already_finished", "message": "Pipeline already finished."}
+    CANCELLED_SESSIONS.add(session_id)
+    session["status"] = "cancelled"
+    # Emit cancellation event to SSE stream
+    emit_pipeline_event(session_id, {
+        "type": "validation_cancelled",
+        "stage": "report",
+        "reason": "user_requested",
+        "message": "Validation stopped by user.",
+    })
+    logger.info("[CANCEL] Validation cancelled for session %s", session_id)
+    return {"status": "cancelled", "session_id": session_id}
+
+
+@app.post("/api/cancel-followup/{request_id}")
+async def cancel_followup(request_id: str):
+    """Signal a running follow-up request to stop."""
+    CANCELLED_FOLLOWUPS.add(request_id)
+    logger.info("[CANCEL-FOLLOWUP] Follow-up cancelled: %s", request_id)
+    return {"status": "cancelled", "request_id": request_id}
 
 
 @app.post("/api/validate", response_model=ValidateResponse)
@@ -319,13 +421,22 @@ def follow_up(req: FollowUpRequest):
     Routes question to ONLY the relevant research agent without running
     Coordinator, other research agents, Comparator/Debate, or Investor-Verdict.
     If explicit revalidation is requested, triggers the full 7-agent pipeline.
+    Includes timing diagnostics for performance measurement.
     """
+    t_start = time.perf_counter()
     question = req.question.strip()
 
     # 1. Resolve or restore session
     session = None
-    if req.session_id and req.session_id in SESSIONS:
-        session = SESSIONS[req.session_id]
+    if req.session_id:
+        if req.session_id in SESSIONS:
+            session = SESSIONS[req.session_id]
+        else:
+            logger.warning("[FOLLOW-UP] Session ID '%s' not found in SESSIONS store", req.session_id)
+            raise HTTPException(
+                status_code=404,
+                detail="Validation session not found. Please start a new validation.",
+            )
     elif req.idea:
         # Fallback: create temporary session
         session_id = str(uuid.uuid4())
@@ -337,18 +448,34 @@ def follow_up(req: FollowUpRequest):
             "conversation": [],
         }
         SESSIONS[session_id] = session
-    elif SESSIONS:
-        # Fallback: take most recent session
-        latest_id = list(SESSIONS.keys())[-1]
-        session = SESSIONS[latest_id]
     else:
+        logger.warning("[FOLLOW-UP] No session_id or startup idea provided")
         raise HTTPException(
-            status_code=400,
-            detail="No active validation session found. Please validate a startup idea first.",
+            status_code=404,
+            detail="Validation session not found. Please start a new validation.",
         )
 
     session_id = session["session_id"]
+
+    # Ensure conversation array is present and is a list
+    if "conversation" not in session or not isinstance(session["conversation"], list):
+        session["conversation"] = []
+        
+    session["current_followup_request_id"] = req.request_id
+
+    # Safe production logs
+    logger.info("[FOLLOW-UP] session_id = %s", session_id)
+    logger.info("[SESSION] found = true")
+    logger.info("[SESSION] keys = %s", list(session.keys()))
+    logger.info("[SESSION] conversation_exists = true (count=%d)", len(session["conversation"]))
+
+    t_session = time.perf_counter()
+    logger.info("[TIMING] followup_received → session_loaded: %.3fs", t_session - t_start)
+
     category = route_question(question)
+    t_routed = time.perf_counter()
+    logger.info("[ROUTER] selected_agent = %s", category)
+    logger.info("[TIMING] router_completed: %.3fs", t_routed - t_start)
 
     # 2. Case: Explicit Revalidation Requested
     if category == "revalidate":
@@ -369,6 +496,8 @@ def follow_up(req: FollowUpRequest):
             "justification": parsed["justification"],
         }
         session["agent_results"] = agent_outputs
+        session["debate_result"] = agent_outputs.get("comparator", "")
+        session["verdict_result"] = agent_outputs.get("verdict", raw_result)
 
         answer_text = (
             f"🔄 Complete revalidation finished!\n\n"
@@ -443,6 +572,8 @@ def follow_up(req: FollowUpRequest):
         )
 
     # 4. Case: Targeted Research Agent (Competitor, Market, Financial, or Risk)
+    t_agent_start = time.perf_counter()
+    logger.info("[TIMING] agent_started (%s): %.3fs", category, t_agent_start - t_start)
     try:
         result = execute_single_agent_followup(category, question, session)
     except Exception as e:
@@ -451,6 +582,8 @@ def follow_up(req: FollowUpRequest):
             status_code=500,
             detail=f"Follow-up agent error ({category}): {type(e).__name__}: {str(e)}",
         )
+    t_agent_done = time.perf_counter()
+    logger.info("[TIMING] agent_completed (%s): %.3fs total from followup_received", category, t_agent_done - t_start)
 
     session["conversation"].append({"role": "user", "content": question})
     session["conversation"].append({

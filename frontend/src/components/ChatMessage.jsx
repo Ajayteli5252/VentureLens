@@ -1,3 +1,4 @@
+import ReactMarkdown from 'react-markdown';
 import './ChatMessage.css';
 
 export default function ChatMessage({
@@ -10,40 +11,6 @@ export default function ChatMessage({
   isRevalidation,
 }) {
   const isUser = role === 'user';
-
-  // Basic formatting helper for bold text and paragraphs/lists
-  const formatContent = (text) => {
-    if (!text) return null;
-    const lines = text.split('\n');
-    return lines.map((line, idx) => {
-      // Bold rendering for **text**
-      const parts = line.split(/(\*\*[^*]+\*\*)/g);
-      const formattedParts = parts.map((part, pIdx) => {
-        if (part.startsWith('**') && part.endsWith('**')) {
-          return <strong key={pIdx}>{part.slice(2, -2)}</strong>;
-        }
-        return part;
-      });
-
-      if (line.trim().startsWith('- ') || line.trim().startsWith('• ')) {
-        return (
-          <li key={idx} className="message-bullet">
-            {formattedParts}
-          </li>
-        );
-      }
-
-      if (line.trim() === '') {
-        return <div key={idx} className="message-spacer" />;
-      }
-
-      return (
-        <p key={idx} className="message-paragraph">
-          {formattedParts}
-        </p>
-      );
-    });
-  };
 
   return (
     <div className={`chat-message ${isUser ? 'chat-message--user' : 'chat-message--ai'} animate-fade-in-up`}>
@@ -79,10 +46,41 @@ export default function ChatMessage({
         {isUser && <span className="chat-message-name">You</span>}
 
         <div className="chat-message-content">
-          {formatContent(content)}
+          {/* Use ReactMarkdown for proper rendering */}
+          <ReactMarkdown
+            className="markdown-content"
+            components={{
+              p: ({ children }) => <p className="md-p">{children}</p>,
+              h1: ({ children }) => <h1 className="md-h1">{children}</h1>,
+              h2: ({ children }) => <h2 className="md-h2">{children}</h2>,
+              h3: ({ children }) => <h3 className="md-h3">{children}</h3>,
+              ul: ({ children }) => <ul className="md-ul">{children}</ul>,
+              ol: ({ children }) => <ol className="md-ol">{children}</ol>,
+              li: ({ children }) => <li className="md-li">{children}</li>,
+              strong: ({ children }) => <strong className="md-strong">{children}</strong>,
+              em: ({ children }) => <em className="md-em">{children}</em>,
+              code: ({ inline, children }) =>
+                inline ? (
+                  <code className="md-code-inline">{children}</code>
+                ) : (
+                  <pre className="md-code-block"><code>{children}</code></pre>
+                ),
+              a: ({ href, children }) => (
+                <a href={href} target="_blank" rel="noopener noreferrer" className="md-link">
+                  {children}
+                </a>
+              ),
+              blockquote: ({ children }) => <blockquote className="md-blockquote">{children}</blockquote>,
+              table: ({ children }) => <table className="md-table">{children}</table>,
+              th: ({ children }) => <th className="md-th">{children}</th>,
+              td: ({ children }) => <td className="md-td">{children}</td>,
+            }}
+          >
+            {content || ''}
+          </ReactMarkdown>
         </div>
 
-        {/* Clickable sources list if present */}
+        {/* Clickable sources list — with domain + open link */}
         {sources && sources.length > 0 && (
           <div className="chat-sources animate-fade-in">
             <div className="chat-sources-header">
@@ -90,18 +88,33 @@ export default function ChatMessage({
               <span className="chat-sources-title">Sources</span>
             </div>
             <ul className="chat-sources-list">
-              {sources.map((src, i) => (
-                <li key={i} className="chat-source-item">
-                  <a
-                    href={src.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="chat-source-link"
-                  >
-                    • {src.title || src.url}
-                  </a>
-                </li>
-              ))}
+              {sources.map((src, i) => {
+                let domain = '';
+                try {
+                  domain = new URL(src.url).hostname.replace('www.', '');
+                } catch (_) {
+                  domain = src.title || src.url;
+                }
+                return (
+                  <li key={i} className="chat-source-item">
+                    <div className="source-meta">
+                      <span className="source-num">[{i + 1}]</span>
+                      <div className="source-info">
+                        <span className="source-title">{src.title || domain}</span>
+                        <span className="source-domain">{domain}</span>
+                      </div>
+                    </div>
+                    <a
+                      href={src.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="chat-source-link"
+                    >
+                      Open ↗
+                    </a>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

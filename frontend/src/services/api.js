@@ -78,11 +78,11 @@ export async function getSession(sessionId) {
  * @param {string} [idea] - The original startup idea as fallback.
  * @returns {Promise<Object>} Follow-up response with agent, agent_name, agent_icon, answer, sources, is_revalidation.
  */
-export async function followUpQuestion(sessionId, question, idea) {
+export async function followUpQuestion(sessionId, question, idea, requestId) {
   const res = await fetch(`${API_BASE}/api/follow-up`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, question, idea }),
+    body: JSON.stringify({ session_id: sessionId, question, idea, request_id: requestId }),
   });
 
   if (!res.ok) {
@@ -90,6 +90,36 @@ export async function followUpQuestion(sessionId, question, idea) {
     throw new Error(err.detail || `API error ${res.status}`);
   }
 
+  return res.json();
+}
+
+/**
+ * Cancel a running validation pipeline.
+ * @param {string} sessionId
+ */
+export async function cancelValidation(sessionId) {
+  const res = await fetch(`${API_BASE}/api/cancel/${sessionId}`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new Error(err.detail || `API error ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Cancel a running follow-up request.
+ * @param {string} requestId
+ */
+export async function cancelFollowUp(requestId) {
+  const res = await fetch(`${API_BASE}/api/cancel-followup/${requestId}`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new Error(err.detail || `API error ${res.status}`);
+  }
   return res.json();
 }
 

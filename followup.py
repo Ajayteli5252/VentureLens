@@ -210,16 +210,39 @@ def execute_single_agent_followup(category: str, question: str, session: dict) -
         agent=selected_agent,
     )
 
-    # Run single-agent crew (Process.sequential, no manager agent)
-    single_crew = Crew(
-        agents=[selected_agent],
-        tasks=[task],
-        process=Process.sequential,
-        memory=False,
-        verbose=True,
-    )
+    # Inject a step_callback to support cancellation and emit events if needed
+    original_step_callback = getattr(selected_agent, "step_callback", None)
+    
+    def followup_cancel_check():
+        from api import CANCELLED_FOLLOWUPS
+        request_id = session.get("current_followup_request_id")
+        return request_id in CANCELLED_FOLLOWUPS
 
-    result = single_crew.kickoff()
+    def followup_step_callback(step):
+        if followup_cancel_check():
+            raise InterruptedError("Follow-up cancelled by user.")
+        
+        # Here we could emit SSE events to a stream if we were using a StreamingResponse.
+        # But even without streaming, this provides fast mid-task cancellation.
+        if original_step_callback:
+            original_step_callback(step)
+
+    selected_agent.step_callback = followup_step_callback
+    
+    try:
+        # Bypassing Crew() overhead (saves ~1-2 seconds of telemetry/initialization)
+        # Directly execute the task with the agent
+        if followup_cancel_check():
+            raise InterruptedError("Follow-up cancelled by user.")
+            
+        result = selected_agent.execute_task(task)
+        
+        if followup_cancel_check():
+            raise InterruptedError("Follow-up cancelled by user.")
+            
+    finally:
+        selected_agent.step_callback = original_step_callback
+
     answer_text = str(result).strip()
 
     sources = extract_sources_from_text(answer_text)
