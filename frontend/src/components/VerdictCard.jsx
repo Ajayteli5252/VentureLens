@@ -1,3 +1,4 @@
+import MarkdownRenderer from './MarkdownRenderer';
 import './VerdictCard.css';
 
 export default function VerdictCard({ score, recommendation, justification }) {
@@ -37,7 +38,9 @@ export default function VerdictCard({ score, recommendation, justification }) {
       {justification && (
         <div className="verdict-justification" style={{ borderLeftColor: scoreColor }}>
           <span className="verdict-just-label">Investment Verdict Justification</span>
-          <p className="verdict-just-text">{justification}</p>
+          <div className="verdict-just-text">
+            <MarkdownRenderer content={justification} />
+          </div>
         </div>
       )}
     </div>

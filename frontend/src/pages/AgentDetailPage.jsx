@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { getSession } from '../services/api';
+import MarkdownRenderer from '../components/MarkdownRenderer';
 import './AgentDetailPage.css';
 
 const AGENT_CONFIGS = {
@@ -103,6 +104,32 @@ const AGENT_CONFIGS = {
   },
 };
 
+// Alias comparator to debate
+AGENT_CONFIGS.comparator = AGENT_CONFIGS.debate;
+
+export const ALL_AGENTS = [
+  { key: 'coordinator', name: 'Coordinator', icon: '🤖' },
+  { key: 'market', name: 'Market', icon: '📊' },
+  { key: 'competitor', name: 'Competitor', icon: '🔎' },
+  { key: 'financial', name: 'Financial', icon: '💰' },
+  { key: 'risk', name: 'Risk', icon: '⚠️' },
+  { key: 'debate', name: 'Debate', icon: '⚖️' },
+  { key: 'verdict', name: 'Verdict', icon: '🏆' },
+];
+
+function normalizeAgentKey(param) {
+  if (!param) return 'market';
+  const clean = param.toLowerCase().trim();
+  if (clean === 'comparator' || clean === 'debate') return 'debate';
+  if (clean === 'coordinator') return 'coordinator';
+  if (clean === 'market') return 'market';
+  if (clean === 'competitor') return 'competitor';
+  if (clean === 'financial') return 'financial';
+  if (clean === 'risk') return 'risk';
+  if (clean === 'verdict' || clean === 'investor') return 'verdict';
+  return clean;
+}
+
 export default function AgentDetailPage() {
   const { sessionId, agent } = useParams();
   const navigate = useNavigate();
@@ -111,7 +138,7 @@ export default function AgentDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const agentKey = (agent || 'market').toLowerCase();
+  const agentKey = normalizeAgentKey(agent);
   const config = AGENT_CONFIGS[agentKey] || AGENT_CONFIGS.market;
 
   useEffect(() => {
@@ -146,10 +173,22 @@ export default function AgentDetailPage() {
       <div className="agent-detail-error animate-fade-in">
         <span className="error-icon">⚠️</span>
         <h3>Agent Details Unavailable</h3>
-        <p>{error || 'Session not found.'}</p>
-        <button type="button" className="action-btn-primary" onClick={() => navigate('/')}>
-          Return Home
-        </button>
+        <p>
+          {error || 'Session not found. The validation session may have expired or the server was restarted.'}
+        </p>
+        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+          Session ID: <code style={{ fontFamily: 'monospace', fontSize: '11px' }}>{sessionId}</code>
+        </p>
+        <div style={{ display: 'flex', gap: '12px', marginTop: '16px', flexWrap: 'wrap', justifyContent: 'center' }}>
+          <button type="button" className="action-btn-primary" onClick={() => navigate('/')}>
+            Start New Validation
+          </button>
+          {sessionId && (
+            <button type="button" className="action-btn-secondary" onClick={() => navigate(`/result/${sessionId}`)}>
+              Try Result Page
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -158,16 +197,44 @@ export default function AgentDetailPage() {
   const agentResults = session.agent_results || {};
   const validationResult = session.validation_result || {};
 
-  // Extract agent specific output
-  let agentOutput = agentResults[agentKey] || '';
-  if (agentKey === 'debate' && !agentOutput) {
-    agentOutput = session.debate_result || agentResults.comparator || '';
-  }
-  if (agentKey === 'verdict' && !agentOutput) {
-    agentOutput = validationResult.justification || session.verdict_result || validationResult.raw || '';
-  }
-  if (agentKey === 'coordinator' && !agentOutput) {
-    agentOutput = `Coordinator Agent successfully analyzed the startup idea: "${idea}" and assigned structured briefs to Market, Competitor, Financial, and Risk research agents.`;
+  // Extract agent-specific output with multi-key fallback
+  let agentOutput = '';
+
+  switch (agentKey) {
+    case 'coordinator':
+      // Coordinator has no separate output key in agent_results — generate a summary
+      agentOutput = agentResults.coordinator
+        || `The Coordinator Agent analyzed the submitted startup idea: "${idea}" and delegated structured research briefs to the Market Research, Competitor Analysis, Financial Feasibility, and Risk Assessment agents running in parallel.`;
+      break;
+    case 'market':
+      agentOutput = agentResults.market || agentResults['Market Research Agent'] || '';
+      break;
+    case 'competitor':
+      agentOutput = agentResults.competitor || agentResults['Competitor Analysis Agent'] || '';
+      break;
+    case 'financial':
+      agentOutput = agentResults.financial || agentResults['Financial Feasibility Agent'] || '';
+      break;
+    case 'risk':
+      agentOutput = agentResults.risk || agentResults['Risk Assessment Agent'] || '';
+      break;
+    case 'debate':
+      agentOutput = agentResults.debate
+        || agentResults.comparator
+        || session.debate_result
+        || agentResults['Comparator / Debate Agent']
+        || '';
+      break;
+    case 'verdict':
+      agentOutput = agentResults.verdict
+        || session.verdict_result
+        || validationResult.justification
+        || validationResult.raw
+        || agentResults['Investor Verdict Agent']
+        || '';
+      break;
+    default:
+      agentOutput = agentResults[agentKey] || '';
   }
 
   // Extract URLs for sources
@@ -179,13 +246,36 @@ export default function AgentDetailPage() {
 
   const sources = extractUrls(agentOutput);
 
+  // Extract search queries from event log
+  const eventLog = session.event_log || [];
+  const searchQueries = eventLog
+    .filter(
+      (ev) =>
+        ev.type === 'agent_activity' &&
+        ev.agent === config.name &&
+        ev.message &&
+        ev.message.startsWith('Searching: ')
+    )
+    .map((ev) => ev.message.replace('Searching: ', '').trim())
+    .filter((q, idx, arr) => arr.indexOf(q) === idx); // unique
+
   return (
     <div className="agent-detail-page animate-fade-in-up">
       <div className="agent-detail-container">
 
         {/* Back navigation bar */}
         <div className="agent-detail-nav">
-          <button type="button" className="back-btn" onClick={() => navigate(-1)}>
+          <button
+            type="button"
+            className="back-btn"
+            onClick={() => {
+              if (window.history.length > 2) {
+                navigate(-1);
+              } else {
+                navigate(`/report/${sessionId}`);
+              }
+            }}
+          >
             ← Back
           </button>
           <div className="quick-links">
@@ -194,6 +284,25 @@ export default function AgentDetailPage() {
             <Link to={`/result/${sessionId}`} className="nav-sub-link">Results</Link>
             <span className="dot-sep">•</span>
             <Link to={`/report/${sessionId}`} className="nav-sub-link">Report</Link>
+            <span className="dot-sep">•</span>
+            <Link to={`/chat/${sessionId}`} className="nav-sub-link">Chat</Link>
+          </div>
+        </div>
+
+        {/* Agent Switcher Pills Bar */}
+        <div className="agent-switcher-bar">
+          <span className="switcher-label">Select Agent:</span>
+          <div className="switcher-pills">
+            {ALL_AGENTS.map((item) => (
+              <Link
+                key={item.key}
+                to={`/agent/${sessionId}/${item.key}`}
+                className={`switcher-pill ${agentKey === item.key ? 'switcher-pill--active' : ''}`}
+              >
+                <span className="pill-icon">{item.icon}</span>
+                <span className="pill-name">{item.name}</span>
+              </Link>
+            ))}
           </div>
         </div>
 
@@ -283,20 +392,10 @@ export default function AgentDetailPage() {
           <div className="findings-output-card">
             {agentOutput ? (
               <div className="findings-text-content">
-                {agentOutput.split('\n').map((line, idx) => {
-                  const trimmed = line.trim();
-                  if (!trimmed) return <div key={idx} className="para-spacer" />;
-                  if (trimmed.startsWith('#')) {
-                    return <h3 key={idx} className="findings-h3">{trimmed.replace(/^#+\s*/, '')}</h3>;
-                  }
-                  if (trimmed.startsWith('- ') || trimmed.startsWith('• ')) {
-                    return <li key={idx} className="findings-bullet">{trimmed.replace(/^[-•]\s*/, '')}</li>;
-                  }
-                  return <p key={idx} className="findings-p">{trimmed}</p>;
-                })}
+                <MarkdownRenderer content={agentOutput} />
               </div>
             ) : (
-              <p className="no-output-text">Agent output recorded in validation session.</p>
+              <p className="no-output-text">No findings recorded yet for this agent in this validation session.</p>
             )}
           </div>
         </div>
@@ -307,6 +406,20 @@ export default function AgentDetailPage() {
             <h2 className="section-title">
               <span>🔗</span> Verified Sources & Citations
             </h2>
+            
+            {searchQueries.length > 0 && (
+              <div className="agent-search-queries">
+                <h4 className="search-queries-title">Search Queries Used:</h4>
+                <div className="search-queries-list">
+                  {searchQueries.map((query, idx) => (
+                    <span key={idx} className="search-query-chip">
+                      🔍 {query}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <ul className="agent-sources-list">
               {sources.map((url, i) => (
                 <li key={i}>

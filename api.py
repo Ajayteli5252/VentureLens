@@ -17,6 +17,7 @@ import time
 import logging
 import queue
 import threading
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,11 +36,51 @@ logger = logging.getLogger(__name__)
 SESSIONS: dict[str, dict] = {}
 PIPELINE_STREAMS: dict[str, queue.Queue] = {}
 
+# Session persistence file for recovery across restarts
+SESSION_STORE_PATH = Path(__file__).resolve().parent / "sessions_store.json"
+
+def _load_persisted_sessions():
+    if SESSION_STORE_PATH.exists():
+        try:
+            with open(SESSION_STORE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    SESSIONS.update(data)
+                    logger.info("Loaded %d persisted sessions from disk.", len(data))
+        except Exception as e:
+            logger.warning("Could not load sessions_store.json: %s", e)
+
+def _persist_sessions():
+    try:
+        serializable = {}
+        for sid, sdata in list(SESSIONS.items()):
+            try:
+                clean_dict = {
+                    k: v for k, v in sdata.items()
+                    if k not in ("_thread",) and not callable(v)
+                }
+                json.dumps(clean_dict)
+                serializable[sid] = clean_dict
+            except Exception:
+                pass
+        with open(SESSION_STORE_PATH, "w", encoding="utf-8") as f:
+            json.dump(serializable, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning("Could not persist sessions to disk: %s", e)
+
+# Auto-load existing sessions at module start
+_load_persisted_sessions()
+
 # Set of session_ids that the user has requested to cancel
 CANCELLED_SESSIONS: set[str] = set()
 
 # Set of follow-up request_ids that the user has requested to cancel
 CANCELLED_FOLLOWUPS: set[str] = set()
+
+# Per-request SSE event queues for follow-up streaming.
+# Keyed by requestId so events are completely isolated between users/sessions.
+# One dedicated background thread writes; the SSE generator reads.
+FOLLOWUP_STREAMS: dict[str, queue.Queue] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +187,185 @@ def _is_cancelled(session_id: str) -> bool:
     return session_id in CANCELLED_SESSIONS
 
 
+# ---------------------------------------------------------------------------
+# Follow-up background runner (streaming version)
+# ---------------------------------------------------------------------------
+def _run_followup_background(request_id: str, session_id: str,
+                              question: str, session: dict, category: str):
+    """Execute a follow-up in a dedicated background thread, streaming events
+    into the request-scoped queue.
+
+    Safety guarantee: FOLLOWUP_STREAMS[request_id] is written ONLY by this
+    single thread and read ONLY by the SSE generator for the same request_id.
+    No other session or request can access this queue.
+    """
+    q = FOLLOWUP_STREAMS.get(request_id)
+    if q is None:
+        return
+
+    def _emit(event: dict):
+        """Emit to the queue only if this request has not been cancelled."""
+        if request_id in CANCELLED_FOLLOWUPS:
+            return
+        try:
+            q.put(event)
+        except Exception:
+            pass
+
+    t_start = time.perf_counter()
+    _emit({
+        "type": "timing",
+        "stage": "request_received",
+        "elapsed_ms": 0.0,
+        "message": f"Follow-up request initialized for {category}",
+    })
+
+    try:
+        # ── Revalidation ────────────────────────────────────────────────────
+        if category == "revalidate":
+            idea = session.get("startup_idea", "")
+            _emit({
+                "type": "followup_started",
+                "agent": "revalidate",
+                "agent_name": "Full Validation Pipeline",
+                "agent_icon": "🔄",
+                "message": "Running full 7-agent revalidation pipeline…",
+            })
+            try:
+                raw_result, agent_outputs = run_validation_pipeline(idea)
+            except Exception as exc:
+                _emit({"type": "followup_error",
+                        "message": f"Revalidation failed: {str(exc)[:200]}"})
+                return
+
+            parsed = _parse_pipeline_output(raw_result)
+            session.update({
+                "validation_result": {
+                    "raw": raw_result,
+                    "score": parsed["score"],
+                    "recommendation": parsed["recommendation"],
+                    "justification": parsed["justification"],
+                },
+                "agent_results": agent_outputs,
+                "debate_result": agent_outputs.get("comparator", ""),
+                "verdict_result": agent_outputs.get("verdict", raw_result),
+            })
+            answer_text = (
+                f"🔄 Complete revalidation finished!\n\n"
+                f"**Score:** {parsed['score']}/10\n"
+                f"**Recommendation:** {parsed['recommendation']}\n\n"
+                f"**Verdict:** {parsed['justification'] or 'See full report for details.'}"
+            )
+            session.setdefault("conversation", []).extend([
+                {"role": "user", "content": question},
+                {"role": "ai", "content": answer_text, "agent": "revalidate",
+                 "agent_name": "Full Validation Pipeline", "agent_icon": "🔄",
+                 "is_revalidation": True},
+            ])
+
+            # Stream delta chunks
+            words = answer_text.split(" ")
+            chunk_size = 4
+            for i in range(0, len(words), chunk_size):
+                if request_id in CANCELLED_FOLLOWUPS:
+                    raise InterruptedError("Follow-up cancelled by user.")
+                chunk = " ".join(words[i : i + chunk_size])
+                if i > 0:
+                    chunk = " " + chunk
+                _emit({"type": "followup_delta", "delta": chunk})
+                time.sleep(0.01)
+
+            total_ms = round((time.perf_counter() - t_start) * 1000, 1)
+            _emit({
+                "type": "followup_completed",
+                "agent": "revalidate",
+                "agent_name": "Full Validation Pipeline",
+                "agent_icon": "🔄",
+                "answer": answer_text,
+                "sources": [],
+                "is_revalidation": True,
+                "score": parsed["score"],
+                "recommendation": parsed["recommendation"],
+                "justification": parsed["justification"],
+                "raw": raw_result,
+                "suggested_followups": [
+                    "Who are my biggest competitors?",
+                    "What is the market size?",
+                    "What are the main risks?",
+                ],
+                "timing": {
+                    "total_ms": total_ms,
+                    "total_seconds": round(total_ms / 1000, 2),
+                },
+            })
+            return
+
+        # ── Ambiguous question ───────────────────────────────────────────────
+        if category == "ambiguous":
+            clarification = "Sure! Would you like to explore the market, competitors, financials, or risks?"
+            session.setdefault("conversation", []).extend([
+                {"role": "user", "content": question},
+                {"role": "ai", "content": clarification, "agent": "assistant",
+                 "agent_name": "VentureLens Assistant", "agent_icon": "💬"},
+            ])
+            _emit({"type": "followup_delta", "delta": clarification})
+            total_ms = round((time.perf_counter() - t_start) * 1000, 1)
+            _emit({
+                "type": "followup_completed",
+                "agent": "assistant",
+                "agent_name": "VentureLens Assistant",
+                "agent_icon": "💬",
+                "answer": clarification,
+                "sources": [],
+                "is_revalidation": False,
+                "suggested_followups": [
+                    "Who are my biggest competitors?",
+                    "What is the market size?",
+                    "What is the revenue model?",
+                    "What are the main risks?",
+                ],
+                "timing": {
+                    "total_ms": total_ms,
+                    "total_seconds": round(total_ms / 1000, 2),
+                },
+            })
+            return
+
+        # ── Targeted specialist agent ────────────────────────────────────────
+        result = execute_single_agent_followup(
+            category=category,
+            question=question,
+            session=session,
+            event_queue=q,
+            request_id=request_id,
+        )
+        # Update session conversation (followup_completed already emitted inside execute_single_agent_followup)
+        session.setdefault("conversation", []).extend([
+            {"role": "user", "content": question},
+            {
+                "role": "ai",
+                "content": result["answer"],
+                "agent": result["agent"],
+                "agent_name": result["agent_name"],
+                "agent_icon": result["agent_icon"],
+                "sources": result["sources"],
+            },
+        ])
+
+    except InterruptedError:
+        _emit({"type": "followup_cancelled", "message": "Generation stopped."})
+    except Exception as exc:
+        logger.exception("[FOLLOW-UP BG] Failed for request %s", request_id)
+        _emit({"type": "followup_error",
+                "message": f"Follow-up failed: {str(exc)[:200]}"})
+    finally:
+        # Always put the None sentinel so the SSE generator can close cleanly
+        try:
+            q.put(None)
+        except Exception:
+            pass
+
+
 def _run_validation_background(session_id: str, idea: str):
     """Execute the full pipeline in the background while exposing an SSE stream."""
     session = SESSIONS.get(session_id)
@@ -209,6 +429,7 @@ def _run_validation_background(session_id: str, idea: str):
                 },
             ])
         session["result_ready"] = True
+        _persist_sessions()
         emit_pipeline_event(session_id, {
             "type": "pipeline_completed",
             "stage": "report",
@@ -218,6 +439,7 @@ def _run_validation_background(session_id: str, idea: str):
     except Exception as exc:
         if _is_cancelled(session_id):
             session["status"] = "cancelled"
+            _persist_sessions()
             emit_pipeline_event(session_id, {
                 "type": "validation_cancelled",
                 "stage": "report",
@@ -228,6 +450,7 @@ def _run_validation_background(session_id: str, idea: str):
         logger.exception("Background validation failed for session %s", session_id)
         session["status"] = "error"
         session["error"] = str(exc)
+        _persist_sessions()
         emit_pipeline_event(session_id, {
             "type": "pipeline_error",
             "stage": "report",
@@ -242,7 +465,9 @@ def _run_validation_background(session_id: str, idea: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("VentureLens API starting")
+    _load_persisted_sessions()
     yield
+    _persist_sessions()
     logger.info("VentureLens API shutting down")
 
 
@@ -256,8 +481,7 @@ app = FastAPI(
 # Allow React dev server on port 5173
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -288,6 +512,7 @@ def start_validation(req: ValidateRequest):
         "validation_result": {},
         "conversation": [],
     }
+    _persist_sessions()
     PIPELINE_STREAMS.setdefault(session_id, queue.Queue())
 
     thread = threading.Thread(
@@ -361,6 +586,151 @@ async def cancel_followup(request_id: str):
     CANCELLED_FOLLOWUPS.add(request_id)
     logger.info("[CANCEL-FOLLOWUP] Follow-up cancelled: %s", request_id)
     return {"status": "cancelled", "request_id": request_id}
+
+
+# ---------------------------------------------------------------------------
+# Follow-up streaming endpoints (non-blocking start + SSE stream)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/follow-up/start")
+def start_follow_up_streaming(req: FollowUpRequest):
+    """Start a follow-up in the background and return immediately with a requestId.
+
+    The client must then open GET /api/follow-up/stream/{request_id} to receive
+    real-time events (followup_started, followup_activity, search_started,
+    source_found, followup_completed, followup_cancelled, followup_error).
+
+    Each requestId gets its own isolated queue — no cross-session event leakage.
+    """
+    t_start = time.perf_counter()
+    question = req.question.strip()
+
+    # ── Resolve session ──────────────────────────────────────────────────────
+    session = None
+    if req.session_id:
+        if req.session_id in SESSIONS:
+            session = SESSIONS[req.session_id]
+        else:
+            logger.warning("[FOLLOW-UP/START] Session ID '%s' not found", req.session_id)
+            raise HTTPException(
+                status_code=404,
+                detail="Validation session not found. Please start a new validation.",
+            )
+    elif req.idea:
+        session_id = str(uuid.uuid4())
+        session = {
+            "session_id": session_id,
+            "startup_idea": req.idea.strip(),
+            "validation_result": {},
+            "agent_results": {},
+            "conversation": [],
+        }
+        SESSIONS[session_id] = session
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail="Validation session not found. Please start a new validation.",
+        )
+
+    session_id = session["session_id"]
+    if "conversation" not in session or not isinstance(session["conversation"], list):
+        session["conversation"] = []
+
+    # Use client-provided requestId or generate one (client generates it so
+    # the cancel endpoint can be called even before the SSE stream is opened)
+    request_id = req.request_id or f"fu-{uuid.uuid4().hex[:16]}"
+    session["current_followup_request_id"] = request_id
+
+    # Route immediately (pure keyword matching — no LLM, ~0 ms)
+    category = route_question(question)
+    t_routed = time.perf_counter()
+    logger.info(
+        "[FOLLOW-UP/START] session=%s request=%s category=%s routing=%.3fs",
+        session_id, request_id, category, t_routed - t_start,
+    )
+
+    # Determine agent display info for immediate UI feedback
+    if category == "ambiguous":
+        agent_name, agent_icon = "VentureLens Assistant", "💬"
+    elif category == "revalidate":
+        agent_name, agent_icon = "Full Validation Pipeline", "🔄"
+    else:
+        info = AGENT_REGISTRY.get(category, {})
+        agent_name = info.get("name", "Specialist Agent")
+        agent_icon = info.get("icon", "⚡")
+
+    # Set up the per-request isolated SSE queue
+    q: queue.Queue = queue.Queue()
+    FOLLOWUP_STREAMS[request_id] = q
+
+    # Start one dedicated background thread per request
+    thread = threading.Thread(
+        target=_run_followup_background,
+        args=(request_id, session_id, question, session, category),
+        daemon=True,
+    )
+    thread.start()
+
+    t_end = time.perf_counter()
+    logger.info("[FOLLOW-UP/START] thread started in %.3fs", t_end - t_start)
+
+    return {
+        "request_id": request_id,
+        "session_id": session_id,
+        "status": "started",
+        "agent": category,
+        "agent_name": agent_name,
+        "agent_icon": agent_icon,
+    }
+
+
+@app.get("/api/follow-up/stream/{request_id}")
+async def stream_followup_events(request_id: str):
+    """SSE stream for a specific follow-up request.
+
+    Each requestId has its own isolated queue written by exactly one background
+    thread. No other request_id's events can appear here.
+    The stream closes when the background thread sends followup_completed,
+    followup_cancelled, or followup_error, or when the sentinel None is received.
+    """
+    q = FOLLOWUP_STREAMS.get(request_id)
+    if q is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Follow-up request not found or already expired.",
+        )
+
+    def event_generator():
+        while True:
+            try:
+                event = q.get(timeout=30)   # 30 s keepalive guard
+            except Exception:
+                yield ": keepalive\n\n"     # SSE comment, keeps connection alive
+                continue
+
+            if event is None:
+                # Background thread finished — close the stream
+                break
+
+            yield f"data: {json.dumps(event)}\n\n"
+
+            # Close after terminal events (belt-and-suspenders alongside None sentinel)
+            if event.get("type") in {
+                "followup_completed", "followup_cancelled", "followup_error"
+            }:
+                break
+
+        # Clean up the queue to avoid memory accumulation
+        FOLLOWUP_STREAMS.pop(request_id, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
+    )
 
 
 @app.post("/api/validate", response_model=ValidateResponse)

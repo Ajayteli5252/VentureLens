@@ -1,4 +1,4 @@
-import ReactMarkdown from 'react-markdown';
+import MarkdownRenderer from './MarkdownRenderer';
 import './ChatMessage.css';
 
 export default function ChatMessage({
@@ -9,6 +9,7 @@ export default function ChatMessage({
   agentIcon,
   sources,
   isRevalidation,
+  timing,
 }) {
   const isUser = role === 'user';
 
@@ -46,38 +47,7 @@ export default function ChatMessage({
         {isUser && <span className="chat-message-name">You</span>}
 
         <div className="chat-message-content">
-          {/* Use ReactMarkdown for proper rendering */}
-          <ReactMarkdown
-            className="markdown-content"
-            components={{
-              p: ({ children }) => <p className="md-p">{children}</p>,
-              h1: ({ children }) => <h1 className="md-h1">{children}</h1>,
-              h2: ({ children }) => <h2 className="md-h2">{children}</h2>,
-              h3: ({ children }) => <h3 className="md-h3">{children}</h3>,
-              ul: ({ children }) => <ul className="md-ul">{children}</ul>,
-              ol: ({ children }) => <ol className="md-ol">{children}</ol>,
-              li: ({ children }) => <li className="md-li">{children}</li>,
-              strong: ({ children }) => <strong className="md-strong">{children}</strong>,
-              em: ({ children }) => <em className="md-em">{children}</em>,
-              code: ({ inline, children }) =>
-                inline ? (
-                  <code className="md-code-inline">{children}</code>
-                ) : (
-                  <pre className="md-code-block"><code>{children}</code></pre>
-                ),
-              a: ({ href, children }) => (
-                <a href={href} target="_blank" rel="noopener noreferrer" className="md-link">
-                  {children}
-                </a>
-              ),
-              blockquote: ({ children }) => <blockquote className="md-blockquote">{children}</blockquote>,
-              table: ({ children }) => <table className="md-table">{children}</table>,
-              th: ({ children }) => <th className="md-th">{children}</th>,
-              td: ({ children }) => <td className="md-td">{children}</td>,
-            }}
-          >
-            {content || ''}
-          </ReactMarkdown>
+          <MarkdownRenderer content={content} />
         </div>
 
         {/* Clickable sources list — with domain + open link */}
@@ -116,6 +86,13 @@ export default function ChatMessage({
                 );
               })}
             </ul>
+          </div>
+        )}
+
+        {/* Latency timing badge */}
+        {timing && (
+          <div className="chat-timing-meta">
+            <span>⏱️ {timing.total_seconds ? `${timing.total_seconds}s` : (timing.total_ms ? `${(timing.total_ms / 1000).toFixed(1)}s` : '')}</span>
           </div>
         )}
       </div>

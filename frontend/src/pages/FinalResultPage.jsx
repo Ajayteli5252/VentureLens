@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { getSession } from '../services/api';
 import VerdictCard from '../components/VerdictCard';
+import MarkdownRenderer from '../components/MarkdownRenderer';
 import './FinalResultPage.css';
 
 export default function FinalResultPage() {
@@ -162,7 +163,7 @@ export default function FinalResultPage() {
 
                   <div className="specialist-findings-snippet">
                     {findings ? (
-                      <p>{findings.slice(0, 180)}...</p>
+                      <MarkdownRenderer content={findings} className="findings-snippet-markdown" />
                     ) : (
                       <p className="empty-findings">Research findings recorded in validation session.</p>
                     )}
@@ -181,7 +182,7 @@ export default function FinalResultPage() {
           </div>
         </div>
 
-        {/* Additional Agents: Comparator & Coordinator */}
+        {/* Additional Agents: Coordinator, Debate, and Verdict */}
         <div className="other-agents-row">
           <div className="other-agent-card">
             <div className="other-agent-info">
@@ -205,6 +206,19 @@ export default function FinalResultPage() {
               </div>
             </div>
             <Link to={`/agent/${sessionId}/debate`} className="other-agent-link">
+              Details →
+            </Link>
+          </div>
+
+          <div className="other-agent-card">
+            <div className="other-agent-info">
+              <span className="other-icon">🏆</span>
+              <div>
+                <h4 className="other-name">Investor Verdict Agent</h4>
+                <p className="other-desc">Final score and investment decision</p>
+              </div>
+            </div>
+            <Link to={`/agent/${sessionId}/verdict`} className="other-agent-link">
               Details →
             </Link>
           </div>

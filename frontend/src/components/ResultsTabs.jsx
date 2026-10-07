@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import MarkdownRenderer from './MarkdownRenderer';
 import './ResultsTabs.css';
 
 const TABS = [
@@ -49,7 +50,9 @@ export default function ResultsTabs({ rawOutput, score, recommendation, justific
             {justification && (
               <div className="overview-section">
                 <h3 className="section-title">Executive Summary</h3>
-                <p className="section-text">{justification}</p>
+                <div className="section-text">
+                  <MarkdownRenderer content={justification} />
+                </div>
               </div>
             )}
 
@@ -65,7 +68,11 @@ export default function ResultsTabs({ rawOutput, score, recommendation, justific
         {activeTab === 'full' && (
           <div className="tab-panel animate-fade-in">
             <div className="full-report">
-              <pre className="report-pre">{rawOutput}</pre>
+              {rawOutput ? (
+                <MarkdownRenderer content={rawOutput} />
+              ) : (
+                <p className="section-text--muted">No raw output available.</p>
+              )}
             </div>
           </div>
         )}

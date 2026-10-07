@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { getSession } from '../services/api';
+import MarkdownRenderer from '../components/MarkdownRenderer';
 import './FullReportPage.css';
 
 const REPORT_TABS = [
@@ -77,42 +78,15 @@ export default function FullReportPage() {
     return [...new Set(matches.map((url) => url.replace(/[.,;:)\]]+$/, '')))];
   };
 
-  const allSources = extractUrls(rawReport);
-
-  const formatTextBlocks = (text) => {
-    if (!text) return <p className="text-muted-italic">No specific agent output recorded.</p>;
-
-    const lines = text.split('\n');
-    return lines.map((line, idx) => {
-      const trimmed = line.trim();
-      if (!trimmed) return <div key={idx} className="block-spacer" />;
-
-      if (trimmed.startsWith('###')) {
-        return <h4 key={idx} className="report-h4">{trimmed.replace(/^###\s*/, '')}</h4>;
-      }
-      if (trimmed.startsWith('##')) {
-        return <h3 key={idx} className="report-h3">{trimmed.replace(/^##\s*/, '')}</h3>;
-      }
-      if (trimmed.startsWith('#')) {
-        return <h2 key={idx} className="report-h2">{trimmed.replace(/^#\s*/, '')}</h2>;
-      }
-
-      if (trimmed.startsWith('- ') || trimmed.startsWith('• ')) {
-        const itemText = trimmed.replace(/^[-•]\s*/, '');
-        return (
-          <li key={idx} className="report-bullet">
-            {itemText}
-          </li>
-        );
-      }
-
-      return (
-        <p key={idx} className="report-paragraph">
-          {trimmed}
-        </p>
-      );
-    });
-  };
+  // Group URLs by agent
+  const agentSources = [
+    { id: 'market', name: 'Market Research', icon: '📊', urls: extractUrls(agentResults?.market) },
+    { id: 'competitor', name: 'Competitor Analysis', icon: '🔎', urls: extractUrls(agentResults?.competitor) },
+    { id: 'financial', name: 'Financial Feasibility', icon: '💰', urls: extractUrls(agentResults?.financial) },
+    { id: 'risk', name: 'Risk Assessment', icon: '⚠️', urls: extractUrls(agentResults?.risk) },
+  ].filter(group => group.urls.length > 0);
+  
+  const hasSources = agentSources.length > 0;
 
   return (
     <div className="full-report-page animate-fade-in-up">
@@ -137,8 +111,8 @@ export default function FullReportPage() {
             <div className="report-metrics-pill">
               <span className="metric-score">Score: {score != null ? `${score}/10` : '—'}</span>
               <span className="metric-divider">•</span>
-              <span className={`metric-rec ${recommendation?.toLowerCase().includes('no') ? 'metric-rec--nogo' : 'metric-rec--go'}`}>
-                {recommendation?.toLowerCase().includes('no') ? 'NOT VALIDATED' : (recommendation ? 'VALIDATE' : '—')}
+              <span className={`metric-rec ${(recommendation || '').toLowerCase().includes('no') ? 'metric-rec--nogo' : 'metric-rec--go'}`}>
+                {(recommendation || '').toLowerCase().includes('no') ? 'NOT VALIDATED' : (recommendation ? 'VALIDATE' : '—')}
               </span>
             </div>
           </div>
@@ -184,40 +158,46 @@ export default function FullReportPage() {
                 </div>
                 <div className="summary-stat-box">
                   <span className="stat-label">Investment Recommendation</span>
-                  <span className={`stat-val ${recommendation?.toLowerCase().includes('no') ? 'stat-rec--nogo' : 'stat-rec--go'}`}>
-                    {recommendation?.toLowerCase().includes('no') ? 'NOT VALIDATED' : (recommendation ? 'VALIDATE' : '—')}
+                  <span className={`stat-val ${(recommendation || '').toLowerCase().includes('no') ? 'stat-rec--nogo' : 'stat-rec--go'}`}>
+                    {(recommendation || '').toLowerCase().includes('no') ? 'NOT VALIDATED' : (recommendation ? 'VALIDATE' : '—')}
                   </span>
                 </div>
               </div>
 
               <div className="report-sub-block">
                 <h3 className="block-title">Investment Justification</h3>
-                <p className="justification-text">{justification || 'No justification text provided.'}</p>
+                <div className="justification-text">
+                  <MarkdownRenderer content={justification || 'No justification text provided.'} />
+                </div>
               </div>
 
               <div className="report-sub-block">
                 <h3 className="block-title">Key Domain Summary</h3>
                 <div className="domain-summaries-grid">
-                  <div className="domain-box">
-                    <span className="domain-icon">📊</span>
-                    <span className="domain-name">Market Demand</span>
-                    <p className="domain-preview">{agentResults.market ? agentResults.market.slice(0, 140) + '...' : 'Market research completed.'}</p>
-                  </div>
-                  <div className="domain-box">
-                    <span className="domain-icon">🔎</span>
-                    <span className="domain-name">Competitive Moat</span>
-                    <p className="domain-preview">{agentResults.competitor ? agentResults.competitor.slice(0, 140) + '...' : 'Competitor landscape mapped.'}</p>
-                  </div>
-                  <div className="domain-box">
-                    <span className="domain-icon">💰</span>
-                    <span className="domain-name">Unit Economics</span>
-                    <p className="domain-preview">{agentResults.financial ? agentResults.financial.slice(0, 140) + '...' : 'Financial model assessed.'}</p>
-                  </div>
-                  <div className="domain-box">
-                    <span className="domain-icon">⚠️</span>
-                    <span className="domain-name">Key Risks</span>
-                    <p className="domain-preview">{agentResults.risk ? agentResults.risk.slice(0, 140) + '...' : 'Critical risks evaluated.'}</p>
-                  </div>
+                  {[
+                    { key: 'market', icon: '📊', name: 'Market Demand', fallback: 'Market research completed.' },
+                    { key: 'competitor', icon: '🔎', name: 'Competitive Moat', fallback: 'Competitor landscape mapped.' },
+                    { key: 'financial', icon: '💰', name: 'Unit Economics', fallback: 'Financial model assessed.' },
+                    { key: 'risk', icon: '⚠️', name: 'Key Risks', fallback: 'Critical risks evaluated.' },
+                  ].map(({ key, icon, name, fallback }) => {
+                    const raw = agentResults[key] || '';
+                    return (
+                      <div key={key} className="domain-box">
+                        <span className="domain-icon">{icon}</span>
+                        <span className="domain-name">{name}</span>
+                        <div className="domain-preview">
+                          {raw ? (
+                            <MarkdownRenderer content={raw} className="domain-preview-markdown" />
+                          ) : (
+                            <p className="domain-preview-fallback">{fallback}</p>
+                          )}
+                        </div>
+                        <Link to={`/agent/${sessionId}/${key}`} className="domain-agent-link">
+                          View full findings →
+                        </Link>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -227,11 +207,16 @@ export default function FullReportPage() {
           {activeTab === 'market' && (
             <div className="report-tab-body animate-fade-in">
               <div className="section-head">
-                <span className="section-badge">Market Research Agent</span>
-                <h2 className="section-headline">Market Size, Target Audience & Demand Dynamics</h2>
+                <div className="section-head-text">
+                  <span className="section-badge">Market Research Agent</span>
+                  <h2 className="section-headline">Market Size, Target Audience & Demand Dynamics</h2>
+                </div>
+                <Link to={`/agent/${sessionId}/market`} className="tab-deep-dive-btn">
+                  View Full Agent Details & Citations →
+                </Link>
               </div>
               <div className="report-text-container">
-                {formatTextBlocks(agentResults.market)}
+                {agentResults.market ? <MarkdownRenderer content={agentResults.market} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
             </div>
           )}
@@ -240,11 +225,16 @@ export default function FullReportPage() {
           {activeTab === 'competitor' && (
             <div className="report-tab-body animate-fade-in">
               <div className="section-head">
-                <span className="section-badge">Competitor Analysis Agent</span>
-                <h2 className="section-headline">Competitor Landscape, Positioning & Moats</h2>
+                <div className="section-head-text">
+                  <span className="section-badge">Competitor Analysis Agent</span>
+                  <h2 className="section-headline">Competitor Landscape, Positioning & Moats</h2>
+                </div>
+                <Link to={`/agent/${sessionId}/competitor`} className="tab-deep-dive-btn">
+                  View Full Agent Details & Citations →
+                </Link>
               </div>
               <div className="report-text-container">
-                {formatTextBlocks(agentResults.competitor)}
+                {agentResults.competitor ? <MarkdownRenderer content={agentResults.competitor} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
             </div>
           )}
@@ -253,11 +243,16 @@ export default function FullReportPage() {
           {activeTab === 'financial' && (
             <div className="report-tab-body animate-fade-in">
               <div className="section-head">
-                <span className="section-badge">Financial Feasibility Agent</span>
-                <h2 className="section-headline">Revenue Models, Unit Economics & Break-Even</h2>
+                <div className="section-head-text">
+                  <span className="section-badge">Financial Feasibility Agent</span>
+                  <h2 className="section-headline">Revenue Models, Unit Economics & Break-Even</h2>
+                </div>
+                <Link to={`/agent/${sessionId}/financial`} className="tab-deep-dive-btn">
+                  View Full Agent Details & Citations →
+                </Link>
               </div>
               <div className="report-text-container">
-                {formatTextBlocks(agentResults.financial)}
+                {agentResults.financial ? <MarkdownRenderer content={agentResults.financial} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
             </div>
           )}
@@ -266,11 +261,16 @@ export default function FullReportPage() {
           {activeTab === 'risk' && (
             <div className="report-tab-body animate-fade-in">
               <div className="section-head">
-                <span className="section-badge">Risk Assessment Agent</span>
-                <h2 className="section-headline">Technical, Regulatory, Market & Operational Risks</h2>
+                <div className="section-head-text">
+                  <span className="section-badge">Risk Assessment Agent</span>
+                  <h2 className="section-headline">Technical, Regulatory, Market & Operational Risks</h2>
+                </div>
+                <Link to={`/agent/${sessionId}/risk`} className="tab-deep-dive-btn">
+                  View Full Agent Details & Citations →
+                </Link>
               </div>
               <div className="report-text-container">
-                {formatTextBlocks(agentResults.risk)}
+                {agentResults.risk ? <MarkdownRenderer content={agentResults.risk} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
             </div>
           )}
@@ -279,11 +279,16 @@ export default function FullReportPage() {
           {activeTab === 'debate' && (
             <div className="report-tab-body animate-fade-in">
               <div className="section-head">
-                <span className="section-badge">Comparator / Debate Agent</span>
-                <h2 className="section-headline">Contradiction Analysis & Trade-off Reconciliation</h2>
+                <div className="section-head-text">
+                  <span className="section-badge">Comparator / Debate Agent</span>
+                  <h2 className="section-headline">Contradiction Analysis & Trade-off Reconciliation</h2>
+                </div>
+                <Link to={`/agent/${sessionId}/debate`} className="tab-deep-dive-btn">
+                  View Full Agent Details & Citations →
+                </Link>
               </div>
               <div className="report-text-container">
-                {formatTextBlocks(debateResult || 'The Comparator Agent reviewed all four specialist reports. No major un-reconciled contradictions were found.')}
+                <MarkdownRenderer content={debateResult || 'The Comparator Agent reviewed all four specialist reports. No major un-reconciled contradictions were found.'} />
               </div>
             </div>
           )}
@@ -295,29 +300,74 @@ export default function FullReportPage() {
                 <span className="section-badge">Raw Synthesis</span>
                 <h2 className="section-headline">Full Pipeline Output Stream</h2>
               </div>
-              <pre className="report-raw-pre">{rawReport || 'No raw output string available.'}</pre>
+              {rawReport ? (
+                <div className="report-text-container">
+                  <MarkdownRenderer content={rawReport} />
+                </div>
+              ) : (
+                <p className="text-muted-italic">No raw output available.</p>
+              )}
             </div>
           )}
 
         </div>
 
         {/* Source Citations Section */}
-        {allSources.length > 0 && (
+        {hasSources && (
           <div className="sources-card">
             <h3 className="sources-title">
               <span>🔗</span> Research Sources & External Citations
             </h3>
-            <ul className="sources-list">
-              {allSources.map((url, i) => (
-                <li key={i}>
-                  <a href={url} target="_blank" rel="noopener noreferrer" className="source-item-link">
-                    {url}
-                  </a>
-                </li>
+            <div className="sources-grouped-list">
+              {agentSources.map((group) => (
+                <div key={group.id} className="source-group">
+                  <h4 className="source-group-title">
+                    <span className="source-group-icon">{group.icon}</span> {group.name}
+                  </h4>
+                  <ul className="sources-list">
+                    {group.urls.map((url, i) => (
+                      <li key={i}>
+                        <a href={url} target="_blank" rel="noopener noreferrer" className="source-item-link">
+                          {url}
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ))}
-            </ul>
+            </div>
           </div>
         )}
+
+        {/* Agent Navigation Section */}
+        <div className="report-agents-nav-section">
+          <h3 className="report-agents-nav-title">
+            <span>🔍</span> Explore Individual Agent Reports
+          </h3>
+          <p className="report-agents-nav-subtitle">
+            Click any agent below to view their full research output, activity log, and cited sources.
+          </p>
+          <div className="report-agents-nav-grid">
+            {[
+              { key: 'coordinator', icon: '🤖', name: 'Coordinator Agent', desc: 'Task assignment & problem framing' },
+              { key: 'market', icon: '📊', name: 'Market Research', desc: 'TAM/SAM/SOM & demand analysis' },
+              { key: 'competitor', icon: '🔎', name: 'Competitor Analysis', desc: 'Rivals, moats & positioning' },
+              { key: 'financial', icon: '💰', name: 'Financial Feasibility', desc: 'Revenue models & break-even' },
+              { key: 'risk', icon: '⚠️', name: 'Risk Assessment', desc: 'Technical, legal & market risks' },
+              { key: 'debate', icon: '⚖️', name: 'Debate Agent', desc: 'Contradiction & trade-off resolution' },
+              { key: 'verdict', icon: '🏆', name: 'Investor Verdict', desc: 'Final score & Go/No-Go decision' },
+            ].map(({ key, icon, name, desc }) => (
+              <Link key={key} to={`/agent/${sessionId}/${key}`} className="report-agent-nav-card">
+                <span className="report-agent-nav-icon">{icon}</span>
+                <div className="report-agent-nav-info">
+                  <span className="report-agent-nav-name">{name}</span>
+                  <span className="report-agent-nav-desc">{desc}</span>
+                </div>
+                <span className="report-agent-nav-arrow">→</span>
+              </Link>
+            ))}
+          </div>
+        </div>
 
         {/* Footer Actions */}
         <div className="report-bottom-nav">

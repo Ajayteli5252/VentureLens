@@ -7,6 +7,7 @@ unrelated research agents.
 """
 
 import re
+import time
 import logging
 import urllib.parse
 from crewai import Task, Crew, Process
@@ -159,12 +160,16 @@ def extract_sources_from_text(text: str) -> list[dict]:
     return sources
 
 
-def execute_single_agent_followup(category: str, question: str, session: dict) -> dict:
+def execute_single_agent_followup(category: str, question: str, session: dict,
+                                   event_queue=None, request_id: str = None) -> dict:
     """Executes ONLY the selected research agent on the follow-up question,
-
     incorporating the startup idea and relevant previous validation findings.
     Coordinator, other research agents, Comparator/Debate, and Investor-Verdict
     are NEVER executed.
+
+    If event_queue is provided, real-time lifecycle and activity events are
+    emitted into it. Each event_queue is exclusively owned by one request_id —
+    no cross-session event leakage is possible.
     """
     agent_info = AGENT_REGISTRY[category]
     selected_agent = agent_info["agent"]
@@ -180,10 +185,41 @@ def execute_single_agent_followup(category: str, question: str, session: dict) -
         question, category, agent_name
     )
 
+    # ---------------------------------------------------------------------------
+    # Scoped event emitter — safe, one dedicated thread per follow-up request
+    # ---------------------------------------------------------------------------
+    def _emit(event: dict):
+        """Put event into the request-scoped queue if not cancelled."""
+        if event_queue is None:
+            return
+        if request_id:
+            from api import CANCELLED_FOLLOWUPS
+            if request_id in CANCELLED_FOLLOWUPS:
+                return
+        try:
+            event_queue.put(event)
+        except Exception:
+            pass
+
+    # Register the search tool emitter for this thread so search_started /
+    # source_found events flow into the same queue (thread-local, zero leakage).
+    if event_queue is not None:
+        from tools.search_tool import set_search_event_emitter, clear_search_event_emitter
+        set_search_event_emitter(_emit)
+
+    # Signal the frontend that the specialist agent has started
+    _emit({
+        "type": "followup_started",
+        "agent": category,
+        "agent_name": agent_name,
+        "agent_icon": agent_icon,
+        "message": f"Starting {agent_name}...",
+    })
+
     startup_idea = session.get("startup_idea", "")
     agent_results = session.get("agent_results", {})
     specific_previous_context = agent_results.get(category, "")
-    
+
     # If specific category context isn't available, fall back to initial validation raw summary
     if not specific_previous_context:
         specific_previous_context = session.get("validation_result", {}).get("raw", "")
@@ -210,48 +246,149 @@ def execute_single_agent_followup(category: str, question: str, session: dict) -
         agent=selected_agent,
     )
 
-    # Inject a step_callback to support cancellation and emit events if needed
+    t_start = time.perf_counter()
+
+    # Inject a step_callback to support cancellation and emit real activity events
     original_step_callback = getattr(selected_agent, "step_callback", None)
-    
+
     def followup_cancel_check():
         from api import CANCELLED_FOLLOWUPS
-        request_id = session.get("current_followup_request_id")
-        return request_id in CANCELLED_FOLLOWUPS
+        # Prefer explicit request_id; fall back to session field for old callers
+        rid = request_id or session.get("current_followup_request_id")
+        return rid in CANCELLED_FOLLOWUPS if rid else False
 
     def followup_step_callback(step):
         if followup_cancel_check():
             raise InterruptedError("Follow-up cancelled by user.")
-        
-        # Here we could emit SSE events to a stream if we were using a StreamingResponse.
-        # But even without streaming, this provides fast mid-task cancellation.
+
+        elapsed = round((time.perf_counter() - t_start) * 1000, 1)
+
+        # Emit real activity events derived from what the agent is actually doing
+        try:
+            action = step[0] if isinstance(step, tuple) else step
+            if hasattr(action, "tool") and action.tool:
+                tool_name = str(action.tool).lower()
+                tool_input = str(getattr(action, "tool_input", ""))
+                if len(tool_input) > 80:
+                    tool_input = tool_input[:80] + "..."
+
+                if "search" in tool_name:
+                    _emit({
+                        "type": "followup_activity",
+                        "message": f"Searching: {tool_input}",
+                    })
+                    _emit({
+                        "type": "timing",
+                        "stage": "tool_search",
+                        "elapsed_ms": elapsed,
+                        "message": f"Search started at +{elapsed}ms",
+                    })
+                elif "read" in tool_name or "scrape" in tool_name or "webpage" in tool_name:
+                    _emit({
+                        "type": "followup_activity",
+                        "message": f"Reading source: {tool_input}",
+                    })
+                else:
+                    _emit({
+                        "type": "followup_activity",
+                        "message": f"Using {action.tool}: {tool_input}",
+                    })
+            elif hasattr(action, "text") and action.text:
+                _emit({
+                    "type": "followup_activity",
+                    "message": "Analyzing findings...",
+                })
+        except Exception:
+            pass
+
         if original_step_callback:
             original_step_callback(step)
 
     selected_agent.step_callback = followup_step_callback
-    
+
     try:
-        # Bypassing Crew() overhead (saves ~1-2 seconds of telemetry/initialization)
-        # Directly execute the task with the agent
         if followup_cancel_check():
             raise InterruptedError("Follow-up cancelled by user.")
-            
+
+        _emit({
+            "type": "timing",
+            "stage": "agent_executing",
+            "elapsed_ms": round((time.perf_counter() - t_start) * 1000, 1),
+            "message": f"Running {agent_name} reasoning loop",
+        })
+
         result = selected_agent.execute_task(task)
-        
+
         if followup_cancel_check():
             raise InterruptedError("Follow-up cancelled by user.")
-            
+
+        total_exec_ms = round((time.perf_counter() - t_start) * 1000, 1)
+        _emit({
+            "type": "timing",
+            "stage": "response_ready",
+            "elapsed_ms": total_exec_ms,
+            "total_ms": total_exec_ms,
+            "message": f"Agent finished in {total_exec_ms}ms",
+        })
+
+        answer_text = str(result).strip()
+        sources = extract_sources_from_text(answer_text)
+
+        # Stream delta tokens/words incrementally to the client for smooth typewriter rendering
+        words = answer_text.split(" ")
+        chunk_size = 4
+        for i in range(0, len(words), chunk_size):
+            if followup_cancel_check():
+                raise InterruptedError("Follow-up cancelled by user.")
+            chunk = " ".join(words[i : i + chunk_size])
+            if i > 0:
+                chunk = " " + chunk
+            _emit({
+                "type": "followup_delta",
+                "delta": chunk,
+            })
+            time.sleep(0.015)
+
+        # Emit the completed event with the full answer and timing info
+        _emit({
+            "type": "followup_completed",
+            "agent": category,
+            "agent_name": agent_name,
+            "agent_icon": agent_icon,
+            "answer": answer_text,
+            "sources": sources,
+            "is_revalidation": False,
+            "suggested_followups": agent_info["followups"],
+            "timing": {
+                "total_ms": total_exec_ms,
+                "total_seconds": round(total_exec_ms / 1000, 2),
+            },
+        })
+
+        return {
+            "agent": category,
+            "agent_name": agent_name,
+            "agent_icon": agent_icon,
+            "answer": answer_text,
+            "sources": sources,
+            "suggested_followups": agent_info["followups"],
+            "timing": {
+                "total_ms": total_exec_ms,
+                "total_seconds": round(total_exec_ms / 1000, 2),
+            },
+        }
+
+    except InterruptedError:
+        _emit({"type": "followup_cancelled", "message": "Generation stopped."})
+        raise
+
     finally:
         selected_agent.step_callback = original_step_callback
+        # Clear thread-local search emitter — scoped cleanup per request
+        if event_queue is not None:
+            try:
+                from tools.search_tool import clear_search_event_emitter
+                clear_search_event_emitter()
+            except Exception:
+                pass
 
-    answer_text = str(result).strip()
-
-    sources = extract_sources_from_text(answer_text)
-
-    return {
-        "agent": category,
-        "agent_name": agent_name,
-        "agent_icon": agent_icon,
-        "answer": answer_text,
-        "sources": sources,
-        "suggested_followups": agent_info["followups"],
-    }

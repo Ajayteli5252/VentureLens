@@ -220,6 +220,41 @@
   border: 1px solid rgba(0, 0, 0, 0.03);
 }
 
+.findings-snippet-markdown {
+  max-height: 110px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.findings-snippet-markdown .md-p {
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.findings-snippet-markdown .md-h1,
+.findings-snippet-markdown .md-h2,
+.findings-snippet-markdown .md-h3,
+.findings-snippet-markdown .md-h4 {
+  font-size: 12px;
+  margin: 6px 0 2px 0;
+  text-transform: none;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.findings-snippet-markdown .md-ul,
+.findings-snippet-markdown .md-ol {
+  margin: 4px 0 6px 0;
+  padding-left: 16px;
+}
+
+.findings-snippet-markdown .md-li {
+  margin-bottom: 2px;
+  font-size: 12px;
+}
+
 .empty-findings {
   color: var(--text-muted);
   font-style: italic;
@@ -245,7 +280,7 @@
 /* Other agents row */
 .other-agents-row {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
 }
 

@@ -28,3 +28,5 @@ Thumbs.db
 frontend/node_modules/
 frontend/dist/
 
+# Local session store
+sessions_store.json

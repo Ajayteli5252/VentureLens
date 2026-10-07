@@ -273,6 +273,25 @@ export default function LiveValidationPage() {
 
   const isRunning = !isCompleted && !isCancelled && !error;
 
+  if (error && !startupIdea) {
+    return (
+      <div className="validation-page animate-fade-in-up">
+        <div className="validation-container">
+          <div className="pipeline-error-card" style={{ padding: '36px', textAlign: 'center', margin: '40px auto', maxWidth: '540px' }}>
+            <span className="error-icon" style={{ fontSize: '32px', display: 'block', marginBottom: '12px' }}>⚠️</span>
+            <h3 style={{ fontSize: '18px', fontWeight: '700', marginBottom: '8px', color: 'var(--text-primary)' }}>Validation Session Not Found</h3>
+            <p style={{ color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.5' }}>
+              {error || 'The requested validation session could not be located.'}
+            </p>
+            <button type="button" className="bottom-nav-btn primary-btn" onClick={() => navigate('/')}>
+              Start New Validation
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="validation-page animate-fade-in-up">
       <div className="validation-container">

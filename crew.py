@@ -185,6 +185,15 @@ def run_validation_pipeline(idea: str, event_emitter=None, cancel_check=None) ->
     last_exception = None
 
     if event_emitter:
+        from tools.search_tool import set_search_event_emitter, clear_search_event_emitter
+        def _pipeline_search_emitter(ev):
+            event_emitter({
+                "type": "agent_activity",
+                "stage": "research",
+                "message": ev.get("message", "Searching web...")
+            })
+        set_search_event_emitter(_pipeline_search_emitter)
+
         event_emitter({
             "type": "pipeline_started",
             "stage": "coordinator",
@@ -195,60 +204,68 @@ def run_validation_pipeline(idea: str, event_emitter=None, cancel_check=None) ->
         for agent in [coordinator, market_agent, competitor_agent, financial_agent, risk_agent, comparator_agent, verdict_agent]:
             _wrap_agent_execution(agent, event_emitter, cancel_check=cancel_check)
 
-    for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt 1 is the original
-        # Check cancellation before each retry attempt
-        if cancel_check and cancel_check():
-            raise InterruptedError("Validation cancelled by user.")
-        try:
-            tasks = build_tasks(idea)
+    try:
+        for attempt in range(1, MAX_RETRIES + 2):  # +2 because range is exclusive and attempt 1 is the original
+            # Check cancellation before each retry attempt
+            if cancel_check and cancel_check():
+                raise InterruptedError("Validation cancelled by user.")
+            try:
+                tasks = build_tasks(idea)
 
-            crew = Crew(
-                agents=[market_agent, competitor_agent, financial_agent,
-                        risk_agent, comparator_agent, verdict_agent],
-                tasks=tasks,
-                process=Process.hierarchical,
-                manager_agent=coordinator,
-                memory=False,                  # Disabled memory (vector embedder not needed)
-                verbose=True,
-                max_rpm=3,                     # Throttled to 3 RPM to respect Gemini Free Tier rate limits (20 req/min limit)
-                max_retry_limit=3,             # CrewAI internal per-agent retries
-            )
+                crew = Crew(
+                    agents=[market_agent, competitor_agent, financial_agent,
+                            risk_agent, comparator_agent, verdict_agent],
+                    tasks=tasks,
+                    process=Process.hierarchical,
+                    manager_agent=coordinator,
+                    memory=False,                  # Disabled memory (vector embedder not needed)
+                    verbose=True,
+                    max_rpm=3,                     # Throttled to 3 RPM to respect Gemini Free Tier rate limits (20 req/min limit)
+                    max_retry_limit=3,             # CrewAI internal per-agent retries
+                )
 
-            result = crew.kickoff(inputs={"idea": idea})
+                result = crew.kickoff(inputs={"idea": idea})
 
-            # Extract individual task outputs for follow-up context
-            agent_outputs = {}
-            if hasattr(result, "tasks_output") and result.tasks_output:
-                keys = ["market", "competitor", "financial", "risk", "comparator", "verdict"]
-                for i, task_out in enumerate(result.tasks_output):
-                    key = keys[i] if i < len(keys) else f"task_{i}"
-                    agent_outputs[key] = str(getattr(task_out, "raw", "") or "")
+                # Extract individual task outputs for follow-up context
+                agent_outputs = {}
+                if hasattr(result, "tasks_output") and result.tasks_output:
+                    keys = ["market", "competitor", "financial", "risk", "comparator", "verdict"]
+                    for i, task_out in enumerate(result.tasks_output):
+                        key = keys[i] if i < len(keys) else f"task_{i}"
+                        agent_outputs[key] = str(getattr(task_out, "raw", "") or "")
 
-            return str(result), agent_outputs
+                return str(result), agent_outputs
 
-        except Exception as e:
-            last_exception = e
-            if attempt > MAX_RETRIES or not _is_retryable(e):
-                logger.error("Non-retryable error or retries exhausted: %s", e)
-                raise
+            except Exception as e:
+                last_exception = e
+                if attempt > MAX_RETRIES or not _is_retryable(e):
+                    logger.error("Non-retryable error or retries exhausted: %s", e)
+                    raise
 
-            # Exponential back-off with jitter
-            delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
-            jitter = random.uniform(0, delay * 0.3)
-            wait = delay + jitter
+                # Exponential back-off with jitter
+                delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
+                jitter = random.uniform(0, delay * 0.3)
+                wait = delay + jitter
 
-            logger.warning(
-                "Attempt %d/%d failed (%s). Retrying in %.1fs…",
-                attempt, MAX_RETRIES + 1, type(e).__name__, wait,
-            )
-            print(
-                f"⚠️  Attempt {attempt}/{MAX_RETRIES + 1} failed: {type(e).__name__}. "
-                f"Retrying in {wait:.0f}s…"
-            )
-            time.sleep(wait)
+                logger.warning(
+                    "Attempt %d/%d failed (%s). Retrying in %.1fs…",
+                    attempt, MAX_RETRIES + 1, type(e).__name__, wait,
+                )
+                print(
+                    f"⚠️  Attempt {attempt}/{MAX_RETRIES + 1} failed: {type(e).__name__}. "
+                    f"Retrying in {wait:.0f}s…"
+                )
+                time.sleep(wait)
 
-    # Should not reach here, but safety net
-    raise last_exception  # type: ignore[misc]
+        # Should not reach here, but safety net
+        raise last_exception  # type: ignore[misc]
+
+    finally:
+        if event_emitter:
+            try:
+                clear_search_event_emitter()
+            except Exception:
+                pass
 
 
 def run_validation(idea: str) -> str:

@@ -48,6 +48,12 @@ export default function Header() {
                 >
                   Chat
                 </Link>
+                <Link
+                  to={`/agent/${currentSessionId}/market`}
+                  className={`breadcrumb-item ${location.pathname.startsWith('/agent') ? 'breadcrumb-item--active' : ''}`}
+                >
+                  Agents
+                </Link>
               </nav>
             </div>
           )}

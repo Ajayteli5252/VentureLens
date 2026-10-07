@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { getSession, followUpQuestion, cancelFollowUp } from '../services/api';
+import MarkdownRenderer from '../components/MarkdownRenderer';
+import { getSession, cancelFollowUp, startFollowUp, streamFollowUpEvents } from '../services/api';
 import ChatMessage from '../components/ChatMessage';
 import ChatInput from '../components/ChatInput';
 import './FollowUpChatPage.css';
@@ -43,13 +44,21 @@ export default function FollowUpChatPage() {
   const [loading, setLoading] = useState(true);
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [predictedAgent, setPredictedAgent] = useState({ name: 'Specialist Agent', icon: '⚡' });
+  const [streamingActivity, setStreamingActivity] = useState(null);
+  const [streamingAnswer, setStreamingAnswer] = useState('');
+  const [streamingTiming, setStreamingTiming] = useState(null);
   const [followUpSuggestions, setFollowUpSuggestions] = useState(DEFAULT_FOLLOW_UP_SUGGESTIONS);
   const [error, setError] = useState(null);
   const [stoppedMessage, setStoppedMessage] = useState(null);
 
   const chatBottomRef = useRef(null);
-  // Ref to track current follow-up request id for cancellation
+  // Tracks the active request ID; set to null when stopped/completed
   const currentFollowUpIdRef = useRef(null);
+  // Holds the active EventSource so we can close it on stop
+  const eventSourceRef = useRef(null);
+  const streamingAnswerRef = useRef('');
+  const predictedAgentRef = useRef(predictedAgent);
+  const currentTimingRef = useRef(null);
 
   useEffect(() => {
     if (!sessionId) {
@@ -61,7 +70,6 @@ export default function FollowUpChatPage() {
     getSession(sessionId)
       .then((data) => {
         setSession(data);
-        // Load initial conversation history if available
         if (data.conversation && Array.isArray(data.conversation)) {
           setMessages(
             data.conversation.map((msg) => ({
@@ -75,7 +83,6 @@ export default function FollowUpChatPage() {
             }))
           );
         } else if (data.startup_idea) {
-          // Fallback initial context message
           setMessages([
             { role: 'user', content: data.startup_idea },
             {
@@ -93,27 +100,192 @@ export default function FollowUpChatPage() {
         setError(err.message || 'Unable to load chat session.');
         setLoading(false);
       });
+
+    // Cleanup: close any open SSE stream when page unmounts
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    };
   }, [sessionId, navigate]);
 
   useEffect(() => {
     if (messages.length > 0 || followUpLoading) {
       chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, followUpLoading]);
+  }, [messages, followUpLoading, streamingActivity]);
 
+  // ---------------------------------------------------------------------------
+  // SSE event handler — scoped to the active requestId
+  // ---------------------------------------------------------------------------
+  const handleFollowUpSSEEvent = useCallback((event, source, requestId) => {
+    // Guard: ignore stale events from a superseded request
+    if (currentFollowUpIdRef.current !== requestId) {
+      source.close();
+      return;
+    }
+
+    switch (event.type) {
+      case 'timing':
+        setStreamingTiming(event);
+        currentTimingRef.current = event;
+        break;
+
+      case 'followup_started': {
+        const agentObj = {
+          name: event.agent_name || 'Specialist Agent',
+          icon: event.agent_icon || '⚡',
+        };
+        setPredictedAgent(agentObj);
+        predictedAgentRef.current = agentObj;
+        setStreamingActivity(event.message || 'Starting analysis...');
+        break;
+      }
+
+      case 'followup_activity':
+        setStreamingActivity(event.message || 'Analyzing...');
+        break;
+
+      case 'search_started':
+        setStreamingActivity(event.message || 'Searching...');
+        break;
+
+      case 'source_found':
+        setStreamingActivity(event.message || 'Source found');
+        break;
+
+      case 'followup_delta':
+        streamingAnswerRef.current = (streamingAnswerRef.current || '') + (event.delta || '');
+        setStreamingAnswer(streamingAnswerRef.current);
+        break;
+
+      case 'followup_completed':
+        source.close();
+        eventSourceRef.current = null;
+        currentFollowUpIdRef.current = null;
+        setFollowUpLoading(false);
+        setStreamingActivity(null);
+        setStreamingAnswer('');
+        streamingAnswerRef.current = '';
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'ai',
+            content: event.answer,
+            agent: event.agent,
+            agentName: event.agent_name,
+            agentIcon: event.agent_icon,
+            sources: event.sources || [],
+            isRevalidation: Boolean(event.is_revalidation),
+            timing: event.timing || currentTimingRef.current,
+          },
+        ]);
+        if (event.suggested_followups?.length) {
+          setFollowUpSuggestions(event.suggested_followups);
+        }
+        if (event.is_revalidation) {
+          setSession((prev) => ({
+            ...prev,
+            validation_result: {
+              ...prev?.validation_result,
+              score: event.score,
+              recommendation: event.recommendation,
+              justification: event.justification,
+            },
+          }));
+        }
+        break;
+
+      case 'followup_cancelled':
+        source.close();
+        eventSourceRef.current = null;
+        currentFollowUpIdRef.current = null;
+        setFollowUpLoading(false);
+        setStreamingActivity(null);
+        if (streamingAnswerRef.current) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'ai',
+              content: streamingAnswerRef.current + '\n\n*(Generation stopped)*',
+              agent: predictedAgentRef.current?.name,
+              agentName: predictedAgentRef.current?.name,
+              agentIcon: predictedAgentRef.current?.icon,
+              sources: [],
+            },
+          ]);
+        }
+        setStreamingAnswer('');
+        streamingAnswerRef.current = '';
+        setStoppedMessage('Generation stopped.');
+        break;
+
+      case 'followup_error':
+        source.close();
+        eventSourceRef.current = null;
+        currentFollowUpIdRef.current = null;
+        setFollowUpLoading(false);
+        setStreamingActivity(null);
+        setStreamingAnswer('');
+        streamingAnswerRef.current = '';
+        setError(event.message || 'Follow-up failed. Please try again.');
+        break;
+
+      default:
+        break;
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Stop handler
+  // ---------------------------------------------------------------------------
   const handleStopFollowUp = async () => {
     const reqId = currentFollowUpIdRef.current;
     if (!reqId) return;
+
+    // 1. Close the SSE stream immediately (no more events)
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
+    // 2. Invalidate the active request so stale callbacks are no-ops
+    currentFollowUpIdRef.current = null;
+
+    // 3. Preserve any partial streamed content
+    if (streamingAnswerRef.current) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'ai',
+          content: streamingAnswerRef.current + '\n\n*(Generation stopped)*',
+          agent: predictedAgent.name,
+          agentName: predictedAgent.name,
+          agentIcon: predictedAgent.icon,
+          sources: [],
+        },
+      ]);
+    }
+
+    // 4. Update UI
+    setStreamingAnswer('');
+    streamingAnswerRef.current = '';
+    setFollowUpLoading(false);
+    setStreamingActivity(null);
+    setStoppedMessage('Generation stopped.');
+
+    // 5. Tell the backend to stop the background thread
     try {
       await cancelFollowUp(reqId);
     } catch (_) {
-      // ignore — optimistic stop
+      // Optimistic stop — ignore backend errors
     }
-    currentFollowUpIdRef.current = null;
-    setFollowUpLoading(false);
-    setStoppedMessage('Generation stopped.');
   };
 
+  // ---------------------------------------------------------------------------
+  // Send handler
+  // ---------------------------------------------------------------------------
   const handleSendMessage = async (text) => {
     const questionText = text.trim();
     if (!questionText || followUpLoading) return;
@@ -121,69 +293,69 @@ export default function FollowUpChatPage() {
     setInputValue('');
     setError(null);
     setStoppedMessage(null);
+    setStreamingActivity(null);
+    setStreamingAnswer('');
+    streamingAnswerRef.current = '';
+    setStreamingTiming(null);
+    currentTimingRef.current = null;
 
-    const prediction = predictAgentLoading(questionText);
-    setPredictedAgent(prediction);
+    // Optimistic agent prediction for immediate UI feedback
+    const optimisticAgent = predictAgentLoading(questionText);
+    setPredictedAgent(optimisticAgent);
     setFollowUpLoading(true);
 
-    // Append user question
+    // Append the user message immediately
     setMessages((prev) => [...prev, { role: 'user', content: questionText }]);
 
-    // Generate a unique request id for cancellation
-    const requestId = `followup-${Date.now()}`;
+    // Generate a unique requestId on the client so we can call cancelFollowUp
+    // even before the SSE stream is opened (race condition safety)
+    const requestId = `fu-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     currentFollowUpIdRef.current = requestId;
 
     try {
-      const response = await followUpQuestion(sessionId, questionText, session?.startup_idea, requestId);
+      // Non-blocking start: returns immediately with requestId + confirmed agent info
+      const startResult = await startFollowUp(
+        sessionId,
+        questionText,
+        session?.startup_idea,
+        requestId,
+      );
 
-      // If cancelled while awaiting, do not update messages
+      // If the user pressed Stop before the server responded, bail out
       if (!currentFollowUpIdRef.current) return;
-      currentFollowUpIdRef.current = null;
 
-      // Append assistant answer
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'ai',
-          content: response.answer,
-          agent: response.agent,
-          agentName: response.agent_name,
-          agentIcon: response.agent_icon,
-          sources: response.sources,
-          isRevalidation: response.is_revalidation,
+      // Update agent display with server-confirmed info
+      setPredictedAgent({
+        name: startResult.agent_name || optimisticAgent.name,
+        icon: startResult.agent_icon || optimisticAgent.icon,
+      });
+
+      // Open the per-request SSE stream
+      const source = streamFollowUpEvents(
+        startResult.request_id,
+        (event) => handleFollowUpSSEEvent(event, source, requestId),
+        (_err) => {
+          // SSE transport error — if we're still loading, treat as completion failure
+          if (currentFollowUpIdRef.current !== requestId) return;
+          setFollowUpLoading(false);
+          setStreamingActivity(null);
         },
-      ]);
+      );
+      eventSourceRef.current = source;
 
-      if (response.suggested_followups && response.suggested_followups.length > 0) {
-        setFollowUpSuggestions(response.suggested_followups);
-      }
-
-      // If revalidation happened, update session state
-      if (response.is_revalidation) {
-        setSession((prev) => ({
-          ...prev,
-          validation_result: {
-            ...prev?.validation_result,
-            score: response.score,
-            recommendation: response.recommendation,
-            justification: response.justification,
-          },
-        }));
-      }
     } catch (err) {
-      // If cancelled, show stopped message instead of error
       if (!currentFollowUpIdRef.current) return;
       currentFollowUpIdRef.current = null;
-      setError(err.message || 'Follow-up query failed.');
+      setFollowUpLoading(false);
+      setStreamingActivity(null);
+      setError(err.message || 'Failed to start follow-up.');
       setMessages((prev) => [
         ...prev,
         {
           role: 'ai',
-          content: `⚠️ ${err.message || 'Unable to answer follow-up question. Please try again.'}`,
+          content: `⚠️ ${err.message || 'Unable to start follow-up. Please try again.'}`,
         },
       ]);
-    } finally {
-      setFollowUpLoading(false);
     }
   };
 
@@ -192,6 +364,24 @@ export default function FollowUpChatPage() {
       <div className="chat-loading-screen animate-fade-in">
         <div className="chat-spinner" />
         <p>Loading follow-up chat session...</p>
+      </div>
+    );
+  }
+
+  if (error || !session) {
+    return (
+      <div className="chat-error-screen animate-fade-in">
+        <div className="chat-page-container">
+          <div className="chat-header-bar">
+            <Link to={`/report/${sessionId}`} className="back-link">
+              ← Back to Report
+            </Link>
+          </div>
+          <div className="chat-error-banner">
+            <span className="error-icon">⚠️</span>
+            <span>{error || 'Validation session could not be found.'}</span>
+          </div>
+        </div>
       </div>
     );
   }
@@ -220,8 +410,8 @@ export default function FollowUpChatPage() {
           {score != null && (
             <div className="header-verdict-summary">
               <span className="summary-score">{score} / 10</span>
-              <span className={`summary-rec ${recommendation?.toLowerCase().includes('no') ? 'rec--nogo' : 'rec--go'}`}>
-                {recommendation?.toLowerCase().includes('no') ? 'NOT VALIDATED' : 'VALIDATE'}
+              <span className={`summary-rec ${(recommendation || '').toLowerCase().includes('no') ? 'rec--nogo' : 'rec--go'}`}>
+                {(recommendation || '').toLowerCase().includes('no') ? 'NOT VALIDATED' : 'VALIDATE'}
               </span>
             </div>
           )}
@@ -247,10 +437,11 @@ export default function FollowUpChatPage() {
               agentIcon={msg.agentIcon}
               sources={msg.sources}
               isRevalidation={msg.isRevalidation}
+              timing={msg.timing}
             />
           ))}
 
-          {/* Real-time agent loading indicator with Stop button */}
+          {/* Real-time agent loading indicator with live activity + incremental streaming text + Stop button */}
           {followUpLoading && (
             <div className="chat-message chat-message--ai chat-message--loading animate-fade-in">
               <div className="chat-message-avatar">
@@ -261,13 +452,39 @@ export default function FollowUpChatPage() {
               <div className="chat-message-body">
                 <div className="followup-loading-header">
                   <span className="followup-loading-name">{predictedAgent.name}</span>
-                  <span className="followup-loading-tag">is researching &amp; analyzing…</span>
+                  <span className="followup-loading-tag">
+                    {streamingAnswer
+                      ? 'is answering…'
+                      : streamingActivity
+                      ? ''
+                      : 'is researching & analyzing…'}
+                  </span>
+                  {streamingTiming?.elapsed_ms && (
+                    <span className="streaming-timing-indicator">
+                      ⏱️ {(streamingTiming.elapsed_ms / 1000).toFixed(1)}s
+                    </span>
+                  )}
                 </div>
-                <div className="typing-indicator">
-                  <span className="typing-dot" />
-                  <span className="typing-dot" />
-                  <span className="typing-dot" />
-                </div>
+
+                {/* Incremental streaming text OR live activity OR typing indicator */}
+                {streamingAnswer ? (
+                  <div className="streaming-answer-container animate-fade-in">
+                    <MarkdownRenderer content={streamingAnswer} className="streaming-markdown" />
+                    <span className="streaming-cursor" />
+                  </div>
+                ) : streamingActivity ? (
+                  <div className="streaming-activity animate-fade-in">
+                    <span className="activity-pulse">●</span>
+                    <span className="activity-text">{streamingActivity}</span>
+                  </div>
+                ) : (
+                  <div className="typing-indicator">
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                  </div>
+                )}
+
                 <button
                   type="button"
                   className="followup-stop-btn"
