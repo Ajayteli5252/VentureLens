@@ -38,7 +38,7 @@ coordinator = Agent(
         "which questions each specialist needs answered."
     ),
     llm=llm,
-    allow_delegation=True,
+    allow_delegation=False,
     verbose=True,
 )
 

@@ -144,14 +144,32 @@
   animation: spin 0.8s linear infinite;
 }
 
+.live-activity-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(232, 111, 45, 0.06);
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  border: 1px solid rgba(232, 111, 45, 0.18);
+  max-width: 100%;
+}
+
+.live-activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-orange);
+  animation: pulseDot 1.2s infinite ease-in-out;
+  flex-shrink: 0;
+}
+
 .live-activity-text {
   color: var(--accent-orange);
   font-weight: 500;
   font-style: italic;
-  display: inline-block;
-  background: rgba(232, 111, 45, 0.05);
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11.5px;
-  border: 1px solid rgba(232, 111, 45, 0.1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

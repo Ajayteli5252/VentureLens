@@ -34,9 +34,7 @@ export default function LiveValidationPage() {
 
   // Sync pipeline state from real SSE events
   const updatePipelineFromEvent = (event) => {
-    if (!event || !event.stage) return;
-
-    const normalizedStage = event.stage;
+    if (!event) return;
 
     if (event.type === 'validation_cancelled') {
       setIsCancelled(true);
@@ -50,45 +48,76 @@ export default function LiveValidationPage() {
       return;
     }
 
+    const normalizedStage = event.stage;
+    const agentKey = event.agent_key;
+
     if (event.type === 'agent_started') {
-      setPipelineStage(normalizedStage);
+      if (normalizedStage) setPipelineStage(normalizedStage);
       setAgentStatuses((prev) => {
         const next = { ...prev };
-        if (normalizedStage === 'coordinator') next.coordinator = 'running';
-        if (normalizedStage === 'research') {
-          if (event.agent && /Market/i.test(event.agent)) next.market = 'running';
-          else if (event.agent && /Competitor/i.test(event.agent)) next.competitor = 'running';
-          else if (event.agent && /Financial/i.test(event.agent)) next.financial = 'running';
-          else if (event.agent && /Risk/i.test(event.agent)) next.risk = 'running';
-          else {
-            if (next.market === 'pending') next.market = 'running';
-            if (next.competitor === 'pending') next.competitor = 'running';
-            if (next.financial === 'pending') next.financial = 'running';
-            if (next.risk === 'pending') next.risk = 'running';
+        if (agentKey) {
+          next[agentKey] = 'running';
+        } else {
+          if (normalizedStage === 'coordinator') next.coordinator = 'running';
+          if (normalizedStage === 'research') {
+            if (event.agent && /Market/i.test(event.agent)) next.market = 'running';
+            else if (event.agent && /Competitor/i.test(event.agent)) next.competitor = 'running';
+            else if (event.agent && /Financial/i.test(event.agent)) next.financial = 'running';
+            else if (event.agent && /Risk/i.test(event.agent)) next.risk = 'running';
+            else {
+              if (next.market === 'pending') next.market = 'running';
+              if (next.competitor === 'pending') next.competitor = 'running';
+              if (next.financial === 'pending') next.financial = 'running';
+              if (next.risk === 'pending') next.risk = 'running';
+            }
           }
+          if (normalizedStage === 'debate') next.debate = 'running';
+          if (normalizedStage === 'verdict') next.verdict = 'running';
+          if (normalizedStage === 'report') next.report = 'running';
         }
-        if (normalizedStage === 'debate') next.debate = 'running';
-        if (normalizedStage === 'verdict') next.verdict = 'running';
-        if (normalizedStage === 'report') next.report = 'running';
         return next;
       });
+
+      if (event.message) {
+        let key = agentKey;
+        if (!key) {
+          if (normalizedStage === 'research') {
+            if (event.agent && /Market/i.test(event.agent)) key = 'market';
+            else if (event.agent && /Competitor/i.test(event.agent)) key = 'competitor';
+            else if (event.agent && /Financial/i.test(event.agent)) key = 'financial';
+            else if (event.agent && /Risk/i.test(event.agent)) key = 'risk';
+          } else {
+            key = normalizedStage;
+          }
+        }
+        if (key) {
+          setAgentActivities((prev) => ({
+            ...prev,
+            [key]: event.message,
+          }));
+        }
+      }
       return;
     }
 
     if (event.type === 'agent_completed') {
-      setPipelineStage(normalizedStage);
+      if (normalizedStage) setPipelineStage(normalizedStage);
       setAgentStatuses((prev) => {
         const next = { ...prev };
-        if (normalizedStage === 'coordinator') next.coordinator = 'completed';
-        if (normalizedStage === 'research') {
-          if (event.agent && /Market/i.test(event.agent)) next.market = 'completed';
-          if (event.agent && /Competitor/i.test(event.agent)) next.competitor = 'completed';
-          if (event.agent && /Financial/i.test(event.agent)) next.financial = 'completed';
-          if (event.agent && /Risk/i.test(event.agent)) next.risk = 'completed';
+        if (agentKey) {
+          next[agentKey] = 'completed';
+        } else {
+          if (normalizedStage === 'coordinator') next.coordinator = 'completed';
+          if (normalizedStage === 'research') {
+            if (event.agent && /Market/i.test(event.agent)) next.market = 'completed';
+            if (event.agent && /Competitor/i.test(event.agent)) next.competitor = 'completed';
+            if (event.agent && /Financial/i.test(event.agent)) next.financial = 'completed';
+            if (event.agent && /Risk/i.test(event.agent)) next.risk = 'completed';
+          }
+          if (normalizedStage === 'debate') next.debate = 'completed';
+          if (normalizedStage === 'verdict') next.verdict = 'completed';
+          if (normalizedStage === 'report') next.report = 'completed';
         }
-        if (normalizedStage === 'debate') next.debate = 'completed';
-        if (normalizedStage === 'verdict') next.verdict = 'completed';
-        if (normalizedStage === 'report') next.report = 'completed';
         return next;
       });
       return;
@@ -117,24 +146,33 @@ export default function LiveValidationPage() {
           setValidationResult(session.validation_result || {});
         })
         .catch(() => {});
+      return;
     }
 
     if (event.type === 'agent_error' || event.type === 'pipeline_error') {
       setError(event.message || 'An error occurred during pipeline execution.');
+      return;
     }
 
     if (event.type === 'agent_activity') {
-      let key = normalizedStage;
-      if (normalizedStage === 'research') {
-        if (event.agent && /Market/i.test(event.agent)) key = 'market';
-        else if (event.agent && /Competitor/i.test(event.agent)) key = 'competitor';
-        else if (event.agent && /Financial/i.test(event.agent)) key = 'financial';
-        else if (event.agent && /Risk/i.test(event.agent)) key = 'risk';
+      let key = agentKey;
+      if (!key) {
+        if (normalizedStage === 'research') {
+          if (event.agent && /Market/i.test(event.agent)) key = 'market';
+          else if (event.agent && /Competitor/i.test(event.agent)) key = 'competitor';
+          else if (event.agent && /Financial/i.test(event.agent)) key = 'financial';
+          else if (event.agent && /Risk/i.test(event.agent)) key = 'risk';
+        } else {
+          key = normalizedStage;
+        }
       }
-      setAgentActivities((prev) => ({
-        ...prev,
-        [key]: event.message,
-      }));
+      if (key && event.message) {
+        setAgentActivities((prev) => ({
+          ...prev,
+          [key]: event.message,
+        }));
+      }
+      return;
     }
   };
 
@@ -149,6 +187,11 @@ export default function LiveValidationPage() {
       .then((session) => {
         if (session.startup_idea) {
           setStartupIdea(session.startup_idea);
+        }
+
+        // Replay previous event logs to synchronize initial UI state
+        if (Array.isArray(session.event_log) && session.event_log.length > 0) {
+          session.event_log.forEach((ev) => updatePipelineFromEvent(ev));
         }
 
         // If session was already cancelled

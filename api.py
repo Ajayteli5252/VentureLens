@@ -412,7 +412,7 @@ def _run_validation_background(session_id: str, idea: str):
             "justification": parsed["justification"],
         }
         session["agent_results"] = agent_outputs
-        session["debate_result"] = agent_outputs.get("comparator", "")
+        session["debate_result"] = agent_outputs.get("comparator", "") or agent_outputs.get("debate", "")
         session["verdict_result"] = agent_outputs.get("verdict", raw_result)
         if "conversation" not in session or session["conversation"] is None:
             session["conversation"] = []
@@ -437,7 +437,7 @@ def _run_validation_background(session_id: str, idea: str):
             "message": "Final validation report is ready.",
         })
     except Exception as exc:
-        if _is_cancelled(session_id):
+        if _is_cancelled(session_id) or isinstance(exc, InterruptedError):
             session["status"] = "cancelled"
             _persist_sessions()
             emit_pipeline_event(session_id, {

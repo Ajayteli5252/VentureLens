@@ -93,7 +93,10 @@ export default function AgentCard({
 
       <p className="agent-card-desc">
         {resolvedStatus === 'running' && activity ? (
-          <span className="live-activity-text animate-fade-in">{activity}</span>
+          <span className="live-activity-wrapper animate-fade-in">
+            <span className="live-activity-dot" />
+            <span className="live-activity-text">{activity}</span>
+          </span>
         ) : (
           cardDesc
         )}
