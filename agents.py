@@ -16,7 +16,7 @@ load_dotenv()
 # OmniKey AI Gateway Configuration
 OMNIKEY_API_KEY = os.getenv("OMNIKEY_API_KEY") or os.getenv("OPENAI_API_KEY")
 OMNIKEY_BASE_URL = os.getenv("OMNIKEY_BASE_URL", "https://omnikey-ai-unified-key-manager.onrender.com/v1")
-PRIMARY_MODEL = os.getenv("MODEL_NAME", "openai/llama-3.1-8b-instant")
+PRIMARY_MODEL = os.getenv("MODEL_NAME", "openai/@cf/meta/llama-3.3-70b-instruct-fp8-fast")
 
 # Central LLM instance for all 7 agents via OmniKey AI
 llm = LLM(
@@ -53,6 +53,7 @@ market_agent = Agent(
     ),
     tools=[web_search_tool],
     llm=llm,
+    max_iter=3,
     verbose=True,
 )
 
@@ -66,6 +67,7 @@ competitor_agent = Agent(
     ),
     tools=[web_search_tool],
     llm=llm,
+    max_iter=3,
     verbose=True,
 )
 
@@ -92,6 +94,7 @@ risk_agent = Agent(
     ),
     tools=[web_search_tool],
     llm=llm,
+    max_iter=3,
     verbose=True,
 )
 

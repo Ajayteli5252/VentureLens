@@ -12,6 +12,7 @@ Run with:  uvicorn api:app --reload --port 8000
 
 import json
 import re
+import sys
 import uuid
 import time
 import logging
@@ -30,7 +31,39 @@ from followup import (
     AGENT_REGISTRY,
 )
 
+# ---------------------------------------------------------------------------
+# Windows UTF-8 logging fix
+# Configure the root logger to use a UTF-8 StreamHandler so that Unicode
+# characters in log messages (from web-search results, agent responses, etc.)
+# don't crash the cp1252/charmap Windows console.
+# ---------------------------------------------------------------------------
+def _configure_utf8_logging():
+    root = logging.getLogger()
+    if not root.handlers:
+        # No handlers configured yet — add one now
+        handler = logging.StreamHandler(
+            stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1, closefd=False)
+            if hasattr(sys.stdout, 'fileno') else sys.stdout
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        ))
+        root.addHandler(handler)
+    else:
+        # Re-wrap existing stream handlers so they use UTF-8
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler):
+                try:
+                    stream = h.stream
+                    if hasattr(stream, 'fileno') and stream.encoding and stream.encoding.lower() not in ('utf-8', 'utf8'):
+                        h.stream = open(stream.fileno(), mode='w', encoding='utf-8', buffering=1, closefd=False)
+                except Exception:
+                    pass
+
+_configure_utf8_logging()
+
 logger = logging.getLogger(__name__)
+
 
 # In-memory session store: session_id -> session dict
 SESSIONS: dict[str, dict] = {}

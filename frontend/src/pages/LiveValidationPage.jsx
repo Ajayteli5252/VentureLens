@@ -15,6 +15,10 @@ const EMPTY_PIPELINE_STATE = {
   report: 'pending',
 };
 
+// Terminal states for a research agent (no longer "in progress")
+const RESEARCH_TERMINAL = new Set(['completed', 'failed', 'error', 'cancelled']);
+
+
 export default function LiveValidationPage() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -24,6 +28,8 @@ export default function LiveValidationPage() {
   const [pipelineStage, setPipelineStage] = useState('coordinator');
   const [agentStatuses, setAgentStatuses] = useState(EMPTY_PIPELINE_STATE);
   const [agentActivities, setAgentActivities] = useState({});
+  // Per-agent error messages (only for failed agents)
+  const [agentErrors, setAgentErrors] = useState({});
   const [error, setError] = useState(null);
   const [isCompleted, setIsCompleted] = useState(false);
   const [isCancelled, setIsCancelled] = useState(false);
@@ -150,7 +156,19 @@ export default function LiveValidationPage() {
     }
 
     if (event.type === 'agent_error' || event.type === 'pipeline_error') {
-      setError(event.message || 'An error occurred during pipeline execution.');
+      const agentKey = event.agent_key;
+      if (agentKey) {
+        // Mark specific agent as failed (not the whole pipeline)
+        setAgentStatuses((prev) => ({ ...prev, [agentKey]: 'failed' }));
+        // Store a user-friendly error message for this agent card
+        const rawMsg = event.message || event.error || 'Agent failed unexpectedly.';
+        // Strip internal error noise — keep first 150 chars
+        const friendlyMsg = rawMsg.replace(/\s+/g, ' ').trim().slice(0, 150);
+        setAgentErrors((prev) => ({ ...prev, [agentKey]: friendlyMsg }));
+      } else {
+        // Pipeline-level error (e.g. all agents failed)
+        setError(event.message || 'An error occurred during pipeline execution.');
+      }
       return;
     }
 
@@ -276,11 +294,20 @@ export default function LiveValidationPage() {
     }
   };
 
+  // A research agent is done when it's in any terminal state (completed OR failed/error/cancelled)
+  const allResearchTerminal =
+    RESEARCH_TERMINAL.has(agentStatuses.market) &&
+    RESEARCH_TERMINAL.has(agentStatuses.competitor) &&
+    RESEARCH_TERMINAL.has(agentStatuses.financial) &&
+    RESEARCH_TERMINAL.has(agentStatuses.risk);
+
+  // "All completed" (no failures) is used for certain display-only checks
   const allResearchCompleted =
     agentStatuses.market === 'completed' &&
     agentStatuses.competitor === 'completed' &&
     agentStatuses.financial === 'completed' &&
     agentStatuses.risk === 'completed';
+
 
   const STEPPER_STAGES = [
     { id: 'coordinator', label: 'Coordinator' },
@@ -294,25 +321,33 @@ export default function LiveValidationPage() {
     if (isCancelled) {
       // If cancelled, completed stages stay completed, others show cancelled
       if (stageId === 'coordinator') return agentStatuses.coordinator === 'completed' ? 'completed' : 'cancelled';
-      if (stageId === 'research') return allResearchCompleted ? 'completed' : 'cancelled';
+      if (stageId === 'research') return allResearchCompleted ? 'completed' : (allResearchTerminal ? 'partial' : 'cancelled');
       if (stageId === 'debate') return agentStatuses.debate === 'completed' ? 'completed' : 'cancelled';
       if (stageId === 'verdict') return agentStatuses.verdict === 'completed' ? 'completed' : 'cancelled';
       if (stageId === 'report') return 'cancelled';
     }
     if (stageId === 'coordinator') return agentStatuses.coordinator;
-    if (stageId === 'research') return allResearchCompleted ? 'completed' : (pipelineStage === 'research' ? 'running' : (agentStatuses.coordinator === 'completed' ? 'running' : 'pending'));
+    if (stageId === 'research') {
+      if (allResearchCompleted) return 'completed';
+      if (allResearchTerminal) return 'partial'; // some failed, some succeeded
+      return pipelineStage === 'research' ? 'running' : (agentStatuses.coordinator === 'completed' ? 'running' : 'pending');
+    }
     if (stageId === 'debate') return agentStatuses.debate;
     if (stageId === 'verdict') return agentStatuses.verdict;
     if (stageId === 'report') return agentStatuses.report;
     return 'pending';
   };
 
+
   const getStepperIcon = (status) => {
     if (status === 'completed') return '✓';
     if (status === 'running') return '●';
     if (status === 'cancelled') return '■';
+    if (status === 'partial') return '⚠';
+    if (status === 'failed' || status === 'error') return '✗';
     return '○';
   };
+
 
   const isRunning = !isCompleted && !isCancelled && !error;
 
@@ -549,25 +584,30 @@ export default function LiveValidationPage() {
               type="market"
               status={agentStatuses.market}
               activity={agentActivities.market}
+              errorMessage={agentErrors.market}
               sessionId={sessionId}
             />
             <AgentCard
               type="competitor"
               status={agentStatuses.competitor}
               activity={agentActivities.competitor}
+              errorMessage={agentErrors.competitor}
               sessionId={sessionId}
             />
             <AgentCard
               type="financial"
               status={agentStatuses.financial}
               activity={agentActivities.financial}
+              errorMessage={agentErrors.financial}
               sessionId={sessionId}
             />
             <AgentCard
               type="risk"
               status={agentStatuses.risk}
               activity={agentActivities.risk}
+              errorMessage={agentErrors.risk}
               sessionId={sessionId}
+
             />
           </div>
         </div>

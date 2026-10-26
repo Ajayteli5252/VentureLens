@@ -50,7 +50,8 @@ const STATUS_META = {
   completed: { label: 'Completed', className: 'agent-status--done', icon: '✓' },
   running: { label: 'In progress', className: 'agent-status--running', icon: '⟳' },
   pending: { label: 'Waiting', className: 'agent-status--pending', icon: '○' },
-  error: { label: 'Failed', className: 'agent-status--error', icon: '⚠' },
+  error: { label: 'Failed', className: 'agent-status--error', icon: '✗' },
+  failed: { label: 'Failed', className: 'agent-status--error', icon: '✗' },
   cancelled: { label: 'Cancelled', className: 'agent-status--cancelled', icon: '■' },
 };
 
@@ -59,6 +60,7 @@ export default function AgentCard({
   completed,
   status,
   activity,
+  errorMessage,
   sessionId,
   responsibility,
 }) {
@@ -69,11 +71,12 @@ export default function AgentCard({
     responsibility: 'Specialist agent research and analysis.',
   };
   const resolvedStatus = status || (completed ? 'completed' : 'running');
+  const isFailed = resolvedStatus === 'failed' || resolvedStatus === 'error';
   const current = STATUS_META[resolvedStatus] || STATUS_META.running;
   const cardDesc = responsibility || meta.responsibility;
 
   return (
-    <div className={`agent-card ${resolvedStatus === 'completed' ? 'agent-card--done' : ''} ${resolvedStatus === 'running' ? 'agent-card--active' : ''}`}>
+    <div className={`agent-card ${resolvedStatus === 'completed' ? 'agent-card--done' : ''} ${resolvedStatus === 'running' ? 'agent-card--active' : ''} ${isFailed ? 'agent-card--failed' : ''}`}>
       <div className="agent-card-top">
         <div className="agent-card-header">
           <span className="agent-card-icon">{meta.icon}</span>
@@ -92,7 +95,14 @@ export default function AgentCard({
       </div>
 
       <p className="agent-card-desc">
-        {resolvedStatus === 'running' && activity ? (
+        {isFailed ? (
+          <span className="agent-error-wrapper">
+            <span className="agent-error-icon">✗</span>
+            <span className="agent-error-text">
+              {errorMessage || 'This agent encountered an error. Other agents continued.'}
+            </span>
+          </span>
+        ) : resolvedStatus === 'running' && activity ? (
           <span className="live-activity-wrapper animate-fade-in">
             <span className="live-activity-dot" />
             <span className="live-activity-text">{activity}</span>

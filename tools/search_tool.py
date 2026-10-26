@@ -7,12 +7,38 @@ source_found events can be streamed into the per-request SSE queue.
 Safety: threading.local() is per-thread, not shared between threads.
 Each follow-up request runs in its own dedicated background thread, so
 registering/clearing the emitter here never mixes events between sessions.
+
+Windows UTF-8 fix: all print() and string-building calls safely encode/decode
+through UTF-8 with 'replace' error handling to avoid cp1252/charmap crashes.
 """
 
 import os
+import sys
 import threading
 import requests
 from crewai.tools import tool
+
+
+def _u(text) -> str:
+    """Return a Unicode-safe version of text (replaces unencodable chars)."""
+    if not isinstance(text, str):
+        text = str(text)
+    return text.encode('utf-8', errors='replace').decode('utf-8')
+
+
+def _safe_print(msg: str):
+    """Print to stdout in UTF-8 without crashing on Windows cp1252 consoles."""
+    try:
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout.buffer.write((_u(msg) + "\n").encode('utf-8', errors='replace'))
+            sys.stdout.buffer.flush()
+        else:
+            print(_u(msg))
+    except Exception:
+        try:
+            print(msg.encode('ascii', errors='replace').decode('ascii'))
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -55,12 +81,12 @@ def web_search_tool(query: str) -> str:
     Use this to find current market data, competitor information, and regulatory facts."""
 
     # Safe debug logging (no secrets or keys logged)
-    print(f"\n[TOOL CALL]\nTool: web_search\nArguments: query='{query}'\n")
+    _safe_print(f"\n[TOOL CALL]\nTool: web_search\nArguments: query='{_u(query)}'\n")
 
     # Notify SSE stream that a search is starting (scoped to this thread's request)
     _emit_search_event({
         "type": "search_started",
-        "message": f"Searching: {query[:80]}",
+        "message": f"Searching: {_u(query)[:80]}",
     })
 
     url = "https://google.serper.dev/search"
@@ -78,9 +104,9 @@ def web_search_tool(query: str) -> str:
 
     results = []
     for item in data.get("organic", [])[:5]:
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        link = item.get("link", "")
+        title = _u(item.get("title", ""))
+        snippet = _u(item.get("snippet", ""))
+        link = _u(item.get("link", ""))
         results.append(f"- {title}: {snippet} ({link})")
 
         # Notify SSE stream that a source was found

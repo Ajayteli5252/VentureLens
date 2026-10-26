@@ -11,8 +11,12 @@ Architecture:
 
 Includes robust per-agent retry logic with exponential back-off for transient errors,
 granular real-time SSE activity streaming, and cancellation support.
+
+Windows UTF-8 fix: all print() calls use _safe_print() which encodes to UTF-8 and
+ignores unencodable characters, preventing charmap/cp1252 crashes.
 """
 
+import sys
 import time
 import logging
 import random
@@ -33,6 +37,42 @@ from tasks import (
 from tools.search_tool import set_search_event_emitter, clear_search_event_emitter
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Windows UTF-8 safe console output
+# On Windows the default console encoding is cp1252 which cannot encode many
+# Unicode characters found in web-search results. We wrap print() so that any
+# unencodable character is replaced with '?' instead of raising UnicodeEncodeError.
+# ---------------------------------------------------------------------------
+def _safe_print(*args, **kwargs):
+    """Unicode-safe replacement for print() on Windows cp1252 consoles."""
+    try:
+        text = " ".join(str(a) for a in args)
+        # Encode to UTF-8 bytes then decode back — this forces a clean roundtrip.
+        # If the underlying stdout can't handle UTF-8 we fall back gracefully.
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout.buffer.write((text + "\n").encode('utf-8', errors='replace'))
+            sys.stdout.buffer.flush()
+        else:
+            safe = text.encode('utf-8', errors='replace').decode('utf-8')
+            print(safe, **kwargs)
+    except Exception:
+        try:
+            # Last-resort fallback: ASCII only
+            print(text.encode('ascii', errors='replace').decode('ascii'), **kwargs)
+        except Exception:
+            pass  # Never crash the pipeline over a print statement
+
+
+def _safe_error_str(exc: Exception) -> str:
+    """Convert an exception to a UTF-8 safe string, replacing unencodable chars."""
+    try:
+        msg = str(exc)
+        return msg.encode('utf-8', errors='replace').decode('utf-8')
+    except Exception:
+        return repr(exc).encode('ascii', errors='replace').decode('ascii')
+
 
 # ---- Retry configuration ----
 MAX_RETRIES = 4          # total attempts = 1 original + 4 retries
@@ -272,7 +312,7 @@ def run_validation_pipeline(
     4. Investor Verdict Agent
     """
     logger.info("[VALIDATION PIPELINE START] Idea: %s", idea)
-    print(
+    _safe_print(
         "\n[VENTURELENS VALIDATION EXECUTION]\n"
         "1. Coordinator Agent\n"
         "2. [Market + Competitor + Financial + Risk] (PARALLEL CONCURRENT EXECUTION)\n"
@@ -349,6 +389,8 @@ def run_validation_pipeline(
         t_parallel_start,
     )
     research_outputs = {}
+    # Track which agents failed so Debate can be informed
+    failed_agents: dict[str, str] = {}
 
     def _worker(rkey):
         if cancel_check and cancel_check():
@@ -380,16 +422,47 @@ def run_validation_pipeline(
                 raise InterruptedError("Validation cancelled by user.")
             time.sleep(0.1)
 
-        # Collect results
-        for f in futures:
-            rkey, out = f.result()
-            research_outputs[rkey] = out
+        # Collect results — handle each future independently so one failure
+        # does NOT abort the remaining agents.
+        for f, rkey in futures.items():
+            try:
+                _, out = f.result()
+                research_outputs[rkey] = out
+            except InterruptedError:
+                # Propagate cancellation immediately
+                raise
+            except Exception as exc:
+                err_msg = _safe_error_str(exc)
+                logger.error(
+                    "[PARALLEL RESEARCH] Agent '%s' failed: %s", rkey, err_msg
+                )
+                failed_agents[rkey] = err_msg
+                # Emit agent_error so frontend shows "Failed" instead of hanging
+                _emit({
+                    "type": "agent_error",
+                    "stage": "research",
+                    "agent": AGENT_META_MAP[rkey]["name"],
+                    "agent_key": rkey,
+                    "message": f"{AGENT_META_MAP[rkey]['name']} failed: {err_msg[:200]}",
+                    "error": err_msg[:500],
+                })
 
     t_parallel_end = time.time()
+    successful = [k for k in research_keys if k not in failed_agents]
     logger.info(
-        "[PARALLEL RESEARCH BATCH COMPLETE] All 4 research agents completed in %.2fs (start=%.3f, end=%.3f)",
+        "[PARALLEL RESEARCH BATCH COMPLETE] %d/%d agents succeeded in %.2fs "
+        "(start=%.3f, end=%.3f). Failed: %s",
+        len(successful), len(research_keys),
         t_parallel_end - t_parallel_start, t_parallel_start, t_parallel_end,
+        list(failed_agents.keys()) or "none",
     )
+
+    # If ALL research agents failed, abort the pipeline — there is nothing to debate.
+    if not successful:
+        raise RuntimeError(
+            "All research agents failed. Cannot proceed to Debate. "
+            f"Failures: { {k: v[:120] for k, v in failed_agents.items()} }"
+        )
 
     if cancel_check and cancel_check():
         raise InterruptedError("Validation cancelled by user.")
@@ -405,12 +478,18 @@ def run_validation_pipeline(
         "message": AGENT_META_MAP["debate"]["start_msg"],
     })
 
+    # Build failure notes so Debate knows which agents didn't produce data
+    def _agent_report(key):
+        if key in failed_agents:
+            return f"[DATA UNAVAILABLE — {AGENT_META_MAP[key]['name']} failed: {failed_agents[key][:200]}]"
+        return research_outputs.get(key, "[No data returned]")
+
     debate_task = build_comparator_task(
         idea,
-        market_report=research_outputs.get("market", ""),
-        competitor_report=research_outputs.get("competitor", ""),
-        financial_report=research_outputs.get("financial", ""),
-        risk_report=research_outputs.get("risk", ""),
+        market_report=_agent_report("market"),
+        competitor_report=_agent_report("competitor"),
+        financial_report=_agent_report("financial"),
+        risk_report=_agent_report("risk"),
     )
     debate_output = _execute_agent_with_retry(
         agent=comparator_agent,
@@ -442,10 +521,10 @@ def run_validation_pipeline(
 
     verdict_task = build_verdict_task(
         idea,
-        market_report=research_outputs.get("market", ""),
-        competitor_report=research_outputs.get("competitor", ""),
-        financial_report=research_outputs.get("financial", ""),
-        risk_report=research_outputs.get("risk", ""),
+        market_report=_agent_report("market"),
+        competitor_report=_agent_report("competitor"),
+        financial_report=_agent_report("financial"),
+        risk_report=_agent_report("risk"),
         debate_report=debate_output,
     )
     verdict_output = _execute_agent_with_retry(
@@ -464,13 +543,15 @@ def run_validation_pipeline(
 
     agent_outputs = {
         "coordinator": coord_output,
-        "market": research_outputs.get("market", ""),
-        "competitor": research_outputs.get("competitor", ""),
-        "financial": research_outputs.get("financial", ""),
-        "risk": research_outputs.get("risk", ""),
+        "market": research_outputs.get("market", _agent_report("market")),
+        "competitor": research_outputs.get("competitor", _agent_report("competitor")),
+        "financial": research_outputs.get("financial", _agent_report("financial")),
+        "risk": research_outputs.get("risk", _agent_report("risk")),
         "comparator": debate_output,
         "debate": debate_output,
         "verdict": verdict_output,
+        # Expose failure metadata so callers can surface it
+        "_failed_agents": failed_agents,
     }
 
     return verdict_output, agent_outputs

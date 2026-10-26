@@ -364,6 +364,14 @@
   color: #FFF;
 }
 
+/* Partial: some research agents succeeded, some failed — pipeline continued */
+.stepper-step--partial .step-circle {
+  border-color: #d97706;
+  background: rgba(217, 119, 6, 0.12);
+  color: #d97706;
+}
+
+
 .step-label {
   font-size: 12px;
   font-weight: 500;
