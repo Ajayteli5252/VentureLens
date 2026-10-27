@@ -63,6 +63,7 @@ export default function AgentCard({
   errorMessage,
   sessionId,
   responsibility,
+  latestSource,
 }) {
   const meta = AGENT_META[type] || {
     icon: '🤖',
@@ -94,7 +95,7 @@ export default function AgentCard({
         </div>
       </div>
 
-      <p className="agent-card-desc">
+      <div className="agent-card-desc">
         {isFailed ? (
           <span className="agent-error-wrapper">
             <span className="agent-error-icon">✗</span>
@@ -110,7 +111,24 @@ export default function AgentCard({
         ) : (
           cardDesc
         )}
-      </p>
+
+        {latestSource && latestSource.url && (
+          <div className="agent-card-live-source animate-fade-in">
+            <span className="live-source-icon">🔗</span>
+            <span className="live-source-label">Source:</span>
+            <a
+              href={latestSource.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="live-source-link"
+              onClick={(e) => e.stopPropagation()}
+              title={latestSource.title || latestSource.url}
+            >
+              {latestSource.title || latestSource.domain || latestSource.url}
+            </a>
+          </div>
+        )}
+      </div>
 
       {sessionId && (
         <div className="agent-card-actions">

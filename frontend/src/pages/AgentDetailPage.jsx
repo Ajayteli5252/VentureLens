@@ -237,14 +237,42 @@ export default function AgentDetailPage() {
       agentOutput = agentResults[agentKey] || '';
   }
 
-  // Extract URLs for sources
+  // Extract agent-specific structured sources
+  const agentSourcesMap = session.agent_sources || {};
+  let structuredSources = agentSourcesMap[agentKey] || [];
+  if ((!structuredSources || structuredSources.length === 0) && agentKey === 'debate') {
+    structuredSources = agentSourcesMap.comparator || [];
+  }
+  if ((!structuredSources || structuredSources.length === 0) && agentKey === 'verdict') {
+    structuredSources = agentSourcesMap.verdict || [];
+  }
+
+  // Fallback to extracting URLs from agent's output text (for older sessions)
   const extractUrls = (text) => {
     if (!text) return [];
     const matches = text.match(/https?:\/\/[^\s()<>"]+/g) || [];
     return [...new Set(matches.map((url) => url.replace(/[.,;:)\]]+$/, '')))];
   };
 
-  const sources = extractUrls(agentOutput);
+  const sources = (structuredSources && structuredSources.length > 0)
+    ? structuredSources
+    : extractUrls(agentOutput).map((url) => {
+        let domain = '';
+        try {
+          domain = new URL(url).hostname.replace('www.', '');
+        } catch (e) {
+          domain = '';
+        }
+        return {
+          title: domain || url,
+          url,
+          domain,
+          snippet: `Cited in ${config.name} findings`,
+          supports: `Directly cited in ${config.name} research output.`,
+          agent: config.name,
+          agent_key: agentKey,
+        };
+      });
 
   // Extract search queries from event log
   const eventLog = session.event_log || [];
@@ -401,36 +429,87 @@ export default function AgentDetailPage() {
         </div>
 
         {/* Agent Sources & Citations */}
-        {sources.length > 0 && (
-          <div className="agent-sources-section">
+        <div className="agent-sources-section">
+          <div className="agent-sources-header-row">
             <h2 className="section-title">
-              <span>🔗</span> Verified Sources & Citations
+              <span>🔗</span> Verified Research Sources & Citations
             </h2>
-            
-            {searchQueries.length > 0 && (
-              <div className="agent-search-queries">
-                <h4 className="search-queries-title">Search Queries Used:</h4>
-                <div className="search-queries-list">
-                  {searchQueries.map((query, idx) => (
-                    <span key={idx} className="search-query-chip">
-                      🔍 {query}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <ul className="agent-sources-list">
-              {sources.map((url, i) => (
-                <li key={i}>
-                  <a href={url} target="_blank" rel="noopener noreferrer" className="agent-source-link">
-                    {url}
-                  </a>
-                </li>
-              ))}
-            </ul>
+            <span className={`agent-sources-count-pill ${sources.length > 0 ? 'pill-active' : 'pill-empty'}`}>
+              {sources.length > 0 ? `${sources.length} Verified ${sources.length === 1 ? 'Source' : 'Sources'}` : '0 Sources'}
+            </span>
           </div>
-        )}
+
+          {searchQueries.length > 0 && (
+            <div className="agent-search-queries">
+              <h4 className="search-queries-title">Search Queries Used:</h4>
+              <div className="search-queries-list">
+                {searchQueries.map((query, idx) => (
+                  <span key={idx} className="search-query-chip">
+                    🔍 {query}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {sources.length > 0 ? (
+            <div className="agent-detail-sources-grid">
+              {sources.map((src, i) => {
+                let domain = src.domain;
+                if (!domain && src.url) {
+                  try {
+                    domain = new URL(src.url).hostname.replace('www.', '');
+                  } catch (e) {
+                    domain = '';
+                  }
+                }
+                const title = src.title || domain || src.url;
+                const explanation = src.supports || src.snippet;
+
+                return (
+                  <div key={src.url || i} className="agent-detail-source-card">
+                    <div className="agent-detail-source-header">
+                      <h4 className="agent-detail-source-title">{title}</h4>
+                      {domain && <span className="agent-detail-source-domain">{domain}</span>}
+                    </div>
+
+                    <div className="agent-detail-source-url-row">
+                      <span className="source-meta-label">URL:</span>
+                      <a
+                        href={src.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="agent-detail-source-url"
+                        title={src.url}
+                      >
+                        {src.url}
+                      </a>
+                    </div>
+
+                    {explanation && (
+                      <p className="agent-detail-source-supports">
+                        <span className="source-meta-label">Supports:</span> {explanation}
+                      </p>
+                    )}
+
+                    <div className="agent-detail-source-footer">
+                      <span className="source-attribution-tag">
+                        Retrieved by: {src.agent || config.name}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="agent-detail-sources-empty">
+              <span className="empty-icon">ℹ️</span>
+              <p className="empty-text">
+                No external sources collected. This agent's analysis was derived from direct problem formulation, domain synthesis, or prior research context without requiring direct external web searches.
+              </p>
+            </div>
+          )}
+        </div>
 
         {/* Bottom Actions */}
         <div className="agent-detail-footer-actions">

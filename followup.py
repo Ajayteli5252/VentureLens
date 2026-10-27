@@ -155,7 +155,13 @@ def extract_sources_from_text(text: str) -> list[dict]:
             parsed = urllib.parse.urlparse(clean_url)
             domain = parsed.netloc.replace("www.", "")
             title = domain or clean_url
-            sources.append({"title": title, "url": clean_url})
+            sources.append({
+                "title": title,
+                "url": clean_url,
+                "domain": domain,
+                "snippet": "Extracted from specialist response",
+                "supports": "Cited directly in agent answer.",
+            })
 
     return sources
 
@@ -203,8 +209,16 @@ def execute_single_agent_followup(category: str, question: str, session: dict,
 
     # Register the search tool emitter for this thread so search_started /
     # source_found events flow into the same queue (thread-local, zero leakage).
+    from tools.search_tool import (
+        set_search_event_emitter,
+        clear_search_event_emitter,
+        init_thread_sources,
+        get_thread_sources,
+        clear_thread_sources,
+    )
+
+    init_thread_sources()
     if event_queue is not None:
-        from tools.search_tool import set_search_event_emitter, clear_search_event_emitter
         set_search_event_emitter(_emit)
 
     # Signal the frontend that the specialist agent has started
@@ -332,7 +346,23 @@ def execute_single_agent_followup(category: str, question: str, session: dict,
         })
 
         answer_text = str(result).strip()
-        sources = extract_sources_from_text(answer_text)
+        collected_sources = get_thread_sources()
+        if collected_sources:
+            sources = []
+            seen_u = set()
+            for s in collected_sources:
+                u = s.get("url", "")
+                if u and u not in seen_u:
+                    seen_u.add(u)
+                    sources.append({
+                        "title": s.get("title", s.get("domain", u)),
+                        "url": u,
+                        "domain": s.get("domain", ""),
+                        "snippet": s.get("snippet", ""),
+                        "supports": s.get("supports", s.get("snippet", "")),
+                    })
+        else:
+            sources = extract_sources_from_text(answer_text)
 
         # Stream delta tokens/words incrementally to the client for smooth typewriter rendering
         words = answer_text.split(" ")
@@ -384,11 +414,11 @@ def execute_single_agent_followup(category: str, question: str, session: dict,
 
     finally:
         selected_agent.step_callback = original_step_callback
-        # Clear thread-local search emitter — scoped cleanup per request
-        if event_queue is not None:
-            try:
-                from tools.search_tool import clear_search_event_emitter
+        # Clear thread-local search emitter and thread sources
+        try:
+            clear_thread_sources()
+            if event_queue is not None:
                 clear_search_event_emitter()
-            except Exception:
-                pass
+        except Exception:
+            pass
 

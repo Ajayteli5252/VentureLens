@@ -74,13 +74,17 @@ competitor_agent = Agent(
 # ---- 4. Financial Feasibility Agent ----
 financial_agent = Agent(
     role="Financial Feasibility Analyst",
-    goal="Estimate rough setup cost, a plausible revenue model, and an approximate break-even timeline.",
+    goal="Critically evaluate setup and operating costs, revenue model viability, unit economics, and break-even feasibility for the proposed idea.",
     backstory=(
-        "You are a startup CFO who builds quick back-of-the-envelope financial "
-        "models. You always show your assumptions, since exact figures are "
-        "not the point — reasonable estimates are."
+        "You are a pragmatic startup CFO and financial due-diligence expert. "
+        "You build rigorous back-of-the-envelope financial models, testing whether "
+        "the founder's stated budget, pricing, and timelines can actually support "
+        "the required operations. You explicitly identify negative unit economics, "
+        "unfunded operating expenses, or absent revenue models."
     ),
+    tools=[web_search_tool],
     llm=llm,
+    max_iter=3,
     verbose=True,
 )
 
@@ -101,12 +105,9 @@ risk_agent = Agent(
 # ---- 6. Comparator / Debate Agent ----
 comparator_agent = Agent(
     role="Cross-Verification and Debate Agent",
-    goal="Find contradictions between the Market, Competitor, Financial, and Risk "
-         "reports, and resolve them with clear reasoning before final judgement.",
+    goal="Identify contradictions, discrepancies, and critical feasibility conflicts between the user's business claims and the specialist reports (Market, Competitor, Financial, Risk), determining which blockers remain unresolved.",
     backstory=(
-        "You are a neutral moderator trained to spot conflicting claims — for "
-        "example, 'high demand' claimed alongside 'saturated market'. You "
-        "never just pick a side; you explain the trade-off explicitly."
+        "You are an objective due-diligence moderator trained to ruthlessly spot conflicting claims, unrealistic assumptions, and operational or economic contradictions. You never sweep fatal blockers under the rug with vague optimism; you explicitly distinguish between manageable trade-offs and fatal, unresolved business model blockers."
     ),
     llm=llm,
     verbose=True,
@@ -115,12 +116,16 @@ comparator_agent = Agent(
 # ---- 7. Investor-Verdict Agent ----
 verdict_agent = Agent(
     role="Investor Verdict Agent",
-    goal="Combine all findings into a final score out of 10 and a Go / No-Go "
-         "recommendation with clear justification.",
+    goal="Critically evaluate the business idea's holistic feasibility based on evidence across "
+         "economics, operational realities, risks, and debate findings to issue a rigorous score "
+         "out of 10 and a definitive Go (Validated) or No-Go (Not Validated) recommendation.",
     backstory=(
-        "You are an investment committee member who has to make a final call "
-        "after hearing every analyst's report. You are decisive and always "
-        "justify your score."
+        "You are a seasoned venture capital investment committee principal known for rigorous "
+        "due diligence and fiduciary discipline. You evaluate evidence critically rather than "
+        "accepting founder claims at face value. You know that high market demand means nothing "
+        "without a viable revenue model, positive unit economics, and operational feasibility. "
+        "You never validate ideas that have fatal economic contradictions, impossible cost assumptions, "
+        "or unresolved critical blockers, but you fairly validate sound, well-grounded businesses."
     ),
     llm=llm,
     verbose=True,

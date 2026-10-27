@@ -17,10 +17,12 @@ ignores unencodable characters, preventing charmap/cp1252 crashes.
 """
 
 import sys
+import re
 import time
 import logging
 import random
 import threading
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from crewai import Crew
 from agents import (
@@ -34,7 +36,13 @@ from tasks import (
     build_verdict_task,
     build_tasks,
 )
-from tools.search_tool import set_search_event_emitter, clear_search_event_emitter
+from tools.search_tool import (
+    set_search_event_emitter,
+    clear_search_event_emitter,
+    init_thread_sources,
+    get_thread_sources,
+    clear_thread_sources,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,10 +172,9 @@ def _execute_agent_with_retry(
     agent_key: str,
     event_emitter=None,
     cancel_check=None,
-) -> str:
-    """Execute a single agent's task with automatic retry on transient errors
-
-    and real-time activity event streaming.
+) -> tuple[str, list[dict]]:
+    """Execute a single agent's task with automatic retry on transient errors,
+    real-time activity event streaming, and agent-specific source collection.
     """
     info = AGENT_META_MAP[agent_key]
     agent_name = info["name"]
@@ -186,6 +193,9 @@ def _execute_agent_with_retry(
         if cancel_check and cancel_check():
             raise InterruptedError("Validation cancelled by user.")
 
+        # Initialize thread-local source accumulator for this agent run
+        init_thread_sources()
+
         # Thread-local search tool event emitter
         def _thread_search_emitter(ev):
             if cancel_check and cancel_check():
@@ -203,6 +213,10 @@ def _execute_agent_with_retry(
                 })
             elif ev_type == "source_found":
                 t = ev.get("title", "")
+                u = ev.get("url", "")
+                d = ev.get("domain", "")
+                s = ev.get("snippet", "")
+                supp = ev.get("supports", s)
                 _emit({
                     "type": "agent_activity",
                     "stage": stage,
@@ -210,7 +224,19 @@ def _execute_agent_with_retry(
                     "agent_key": agent_key,
                     "message": f"Reading: {t[:60]}" if t else "Reading source...",
                     "source_title": t,
-                    "source_url": ev.get("url", ""),
+                    "source_url": u,
+                    "source_domain": d,
+                })
+                _emit({
+                    "type": "source_found",
+                    "stage": stage,
+                    "agent": agent_name,
+                    "agent_key": agent_key,
+                    "title": t,
+                    "url": u,
+                    "domain": d,
+                    "snippet": s,
+                    "supports": supp,
                 })
 
         set_search_event_emitter(_thread_search_emitter)
@@ -277,7 +303,32 @@ def _execute_agent_with_retry(
             res = crew.kickoff()
             t1 = time.time()
             logger.info("[%s COMPLETE] key=%s, timestamp=%.3f (duration=%.2fs)", agent_name, agent_key, t1, t1 - t0)
-            return str(res).strip()
+
+            output_text = str(res).strip()
+            collected_sources = get_thread_sources()
+            for s in collected_sources:
+                s["agent"] = agent_name
+                s["agent_key"] = agent_key
+
+            # Also check if the agent directly cited any real external URLs in the response text
+            raw_urls = re.findall(r'https?://[^\s()<>"\']+', output_text)
+            seen_urls = {s.get("url") for s in collected_sources if s.get("url")}
+            for u in raw_urls:
+                clean_u = u.rstrip(".,;:)>]")
+                if clean_u not in seen_urls and not clean_u.endswith(("api", "v1", "json")):
+                    seen_urls.add(clean_u)
+                    parsed_d = urlparse(clean_u).netloc.replace("www.", "") if clean_u else ""
+                    collected_sources.append({
+                        "title": parsed_d or clean_u,
+                        "url": clean_u,
+                        "domain": parsed_d,
+                        "snippet": f"External source cited by {agent_name}",
+                        "supports": f"Directly cited by {agent_name} in findings.",
+                        "agent": agent_name,
+                        "agent_key": agent_key,
+                    })
+
+            return output_text, collected_sources
         except InterruptedError:
             raise
         except Exception as e:
@@ -292,6 +343,7 @@ def _execute_agent_with_retry(
             time.sleep(wait)
         finally:
             clear_search_event_emitter()
+            clear_thread_sources()
             agent.step_callback = orig_callback
 
     if last_exception:
@@ -303,13 +355,18 @@ def run_validation_pipeline(
     idea: str,
     event_emitter=None,
     cancel_check=None,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], dict[str, list[dict]]]:
     """Run the multi-agent validation pipeline:
 
     1. Coordinator Agent
     2. [Market + Competitor + Financial + Risk] (PARALLEL CONCURRENT EXECUTION)
     3. Comparator / Debate Agent
     4. Investor Verdict Agent
+
+    Returns:
+        verdict_output: str
+        agent_outputs: dict[str, str]
+        agent_sources: dict[str, list[dict]]
     """
     logger.info("[VALIDATION PIPELINE START] Idea: %s", idea)
     _safe_print(
@@ -349,7 +406,7 @@ def run_validation_pipeline(
     })
 
     coord_task = build_coordinator_task(idea)
-    coord_output = _execute_agent_with_retry(
+    coord_output, coord_sources = _execute_agent_with_retry(
         agent=coordinator,
         task=coord_task,
         agent_key="coordinator",
@@ -389,6 +446,7 @@ def run_validation_pipeline(
         t_parallel_start,
     )
     research_outputs = {}
+    research_sources: dict[str, list[dict]] = {}
     # Track which agents failed so Debate can be informed
     failed_agents: dict[str, str] = {}
 
@@ -396,7 +454,7 @@ def run_validation_pipeline(
         if cancel_check and cancel_check():
             raise InterruptedError("Validation cancelled by user.")
         agent, task, _ = research_tasks[rkey]
-        out = _execute_agent_with_retry(
+        out, sources = _execute_agent_with_retry(
             agent=agent,
             task=task,
             agent_key=rkey,
@@ -409,7 +467,7 @@ def run_validation_pipeline(
             "agent": AGENT_META_MAP[rkey]["name"],
             "agent_key": rkey,
         })
-        return rkey, out
+        return rkey, out, sources
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(_worker, k): k for k in research_keys}
@@ -426,8 +484,9 @@ def run_validation_pipeline(
         # does NOT abort the remaining agents.
         for f, rkey in futures.items():
             try:
-                _, out = f.result()
+                _, out, sources = f.result()
                 research_outputs[rkey] = out
+                research_sources[rkey] = sources
             except InterruptedError:
                 # Propagate cancellation immediately
                 raise
@@ -437,6 +496,7 @@ def run_validation_pipeline(
                     "[PARALLEL RESEARCH] Agent '%s' failed: %s", rkey, err_msg
                 )
                 failed_agents[rkey] = err_msg
+                research_sources[rkey] = []
                 # Emit agent_error so frontend shows "Failed" instead of hanging
                 _emit({
                     "type": "agent_error",
@@ -491,7 +551,7 @@ def run_validation_pipeline(
         financial_report=_agent_report("financial"),
         risk_report=_agent_report("risk"),
     )
-    debate_output = _execute_agent_with_retry(
+    debate_output, debate_raw_sources = _execute_agent_with_retry(
         agent=comparator_agent,
         task=debate_task,
         agent_key="debate",
@@ -504,6 +564,26 @@ def run_validation_pipeline(
         "agent": "Comparator / Debate Agent",
         "agent_key": "debate",
     })
+
+    # Associate sources referenced during debate cross-verification
+    debate_sources = list(debate_raw_sources)
+    debate_seen = {s.get("url") for s in debate_sources if s.get("url")}
+    for rk, r_list in research_sources.items():
+        for s in r_list:
+            u = s.get("url", "")
+            d = s.get("domain", "")
+            if u and u not in debate_seen:
+                if (u and u in debate_output) or (d and d in debate_output):
+                    debate_seen.add(u)
+                    debate_sources.append({
+                        "title": s.get("title", ""),
+                        "url": u,
+                        "domain": d,
+                        "snippet": s.get("snippet", ""),
+                        "supports": f"Referenced during debate cross-verification of {AGENT_META_MAP[rk]['name']} evidence.",
+                        "agent": AGENT_META_MAP["debate"]["name"],
+                        "agent_key": "debate",
+                    })
 
     if cancel_check and cancel_check():
         raise InterruptedError("Validation cancelled by user.")
@@ -527,7 +607,7 @@ def run_validation_pipeline(
         risk_report=_agent_report("risk"),
         debate_report=debate_output,
     )
-    verdict_output = _execute_agent_with_retry(
+    verdict_output, verdict_raw_sources = _execute_agent_with_retry(
         agent=verdict_agent,
         task=verdict_task,
         agent_key="verdict",
@@ -541,6 +621,37 @@ def run_validation_pipeline(
         "agent_key": "verdict",
     })
 
+    # Associate sources referenced in the final verdict investment thesis
+    verdict_sources = list(verdict_raw_sources)
+    verdict_seen = {s.get("url") for s in verdict_sources if s.get("url")}
+    for rk, r_list in research_sources.items():
+        for s in r_list:
+            u = s.get("url", "")
+            d = s.get("domain", "")
+            if u and u not in verdict_seen:
+                if (u and u in verdict_output) or (d and d in verdict_output):
+                    verdict_seen.add(u)
+                    verdict_sources.append({
+                        "title": s.get("title", ""),
+                        "url": u,
+                        "domain": d,
+                        "snippet": s.get("snippet", ""),
+                        "supports": f"Synthesized in final investment thesis from {AGENT_META_MAP[rk]['name']} evidence.",
+                        "agent": AGENT_META_MAP["verdict"]["name"],
+                        "agent_key": "verdict",
+                    })
+
+    agent_sources = {
+        "coordinator": coord_sources,
+        "market": research_sources.get("market", []),
+        "competitor": research_sources.get("competitor", []),
+        "financial": research_sources.get("financial", []),
+        "risk": research_sources.get("risk", []),
+        "debate": debate_sources,
+        "comparator": debate_sources,
+        "verdict": verdict_sources,
+    }
+
     agent_outputs = {
         "coordinator": coord_output,
         "market": research_outputs.get("market", _agent_report("market")),
@@ -552,15 +663,16 @@ def run_validation_pipeline(
         "verdict": verdict_output,
         # Expose failure metadata so callers can surface it
         "_failed_agents": failed_agents,
+        "_agent_sources": agent_sources,
     }
 
-    return verdict_output, agent_outputs
+    return verdict_output, agent_outputs, agent_sources
 
 
 def run_validation(idea: str) -> str:
     """Run the full multi-agent validation and return the raw verdict string."""
-    raw_result, _ = run_validation_pipeline(idea)
-    return raw_result
+    res = run_validation_pipeline(idea)
+    return res[0]
 
 
 if __name__ == "__main__":

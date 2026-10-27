@@ -28,6 +28,7 @@ export default function LiveValidationPage() {
   const [pipelineStage, setPipelineStage] = useState('coordinator');
   const [agentStatuses, setAgentStatuses] = useState(EMPTY_PIPELINE_STATE);
   const [agentActivities, setAgentActivities] = useState({});
+  const [liveSources, setLiveSources] = useState({});
   // Per-agent error messages (only for failed agents)
   const [agentErrors, setAgentErrors] = useState({});
   const [error, setError] = useState(null);
@@ -172,6 +173,33 @@ export default function LiveValidationPage() {
       return;
     }
 
+    if (event.type === 'source_found') {
+      let key = agentKey;
+      if (!key) {
+        if (event.agent && /Market/i.test(event.agent)) key = 'market';
+        else if (event.agent && /Competitor/i.test(event.agent)) key = 'competitor';
+        else if (event.agent && /Financial/i.test(event.agent)) key = 'financial';
+        else if (event.agent && /Risk/i.test(event.agent)) key = 'risk';
+        else if (event.agent && /Debate|Comparator/i.test(event.agent)) key = 'debate';
+        else if (event.agent && /Verdict/i.test(event.agent)) key = 'verdict';
+        else key = normalizedStage;
+      }
+      if (key && (event.url || event.title)) {
+        const newSrc = {
+          title: event.title || event.url,
+          url: event.url,
+          domain: event.domain || '',
+          snippet: event.snippet || '',
+          supports: event.supports || '',
+        };
+        setLiveSources((prev) => ({
+          ...prev,
+          [key]: [newSrc, ...(prev[key] || []).filter((s) => s.url !== event.url)],
+        }));
+      }
+      return;
+    }
+
     if (event.type === 'agent_activity') {
       let key = agentKey;
       if (!key) {
@@ -190,6 +218,17 @@ export default function LiveValidationPage() {
           [key]: event.message,
         }));
       }
+      if (key && event.source_url) {
+        const newSrc = {
+          title: event.source_title || event.source_url,
+          url: event.source_url,
+          domain: event.source_domain || '',
+        };
+        setLiveSources((prev) => ({
+          ...prev,
+          [key]: [newSrc, ...(prev[key] || []).filter((s) => s.url !== event.source_url)],
+        }));
+      }
       return;
     }
   };
@@ -205,6 +244,10 @@ export default function LiveValidationPage() {
       .then((session) => {
         if (session.startup_idea) {
           setStartupIdea(session.startup_idea);
+        }
+
+        if (session.agent_sources) {
+          setLiveSources(session.agent_sources);
         }
 
         // Replay previous event logs to synchronize initial UI state
@@ -567,6 +610,7 @@ export default function LiveValidationPage() {
             type="coordinator"
             status={agentStatuses.coordinator}
             activity={agentActivities.coordinator}
+            latestSource={liveSources.coordinator?.[0] || null}
             sessionId={sessionId}
             responsibility="Understanding your startup idea and assigning structured research briefs to parallel agents."
           />
@@ -584,6 +628,7 @@ export default function LiveValidationPage() {
               type="market"
               status={agentStatuses.market}
               activity={agentActivities.market}
+              latestSource={liveSources.market?.[0] || null}
               errorMessage={agentErrors.market}
               sessionId={sessionId}
             />
@@ -591,6 +636,7 @@ export default function LiveValidationPage() {
               type="competitor"
               status={agentStatuses.competitor}
               activity={agentActivities.competitor}
+              latestSource={liveSources.competitor?.[0] || null}
               errorMessage={agentErrors.competitor}
               sessionId={sessionId}
             />
@@ -598,6 +644,7 @@ export default function LiveValidationPage() {
               type="financial"
               status={agentStatuses.financial}
               activity={agentActivities.financial}
+              latestSource={liveSources.financial?.[0] || null}
               errorMessage={agentErrors.financial}
               sessionId={sessionId}
             />
@@ -605,9 +652,9 @@ export default function LiveValidationPage() {
               type="risk"
               status={agentStatuses.risk}
               activity={agentActivities.risk}
+              latestSource={liveSources.risk?.[0] || null}
               errorMessage={agentErrors.risk}
               sessionId={sessionId}
-
             />
           </div>
         </div>
@@ -622,6 +669,7 @@ export default function LiveValidationPage() {
             type="debate"
             status={agentStatuses.debate}
             activity={agentActivities.debate}
+            latestSource={liveSources.debate?.[0] || liveSources.comparator?.[0] || null}
             sessionId={sessionId}
             responsibility="Cross-checking Market, Competitor, Financial, and Risk reports to identify and resolve contradictions."
           />
@@ -637,6 +685,7 @@ export default function LiveValidationPage() {
             type="verdict"
             status={agentStatuses.verdict}
             activity={agentActivities.verdict}
+            latestSource={liveSources.verdict?.[0] || null}
             sessionId={sessionId}
             responsibility="Synthesizing all research and debate into a final 1-10 score and definitive Validate/Not Validated verdict."
           />

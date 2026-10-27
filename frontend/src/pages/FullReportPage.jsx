@@ -71,22 +71,141 @@ export default function FullReportPage() {
   const rawReport = validationResult.raw || '';
   const debateResult = session.debate_result || agentResults.comparator || '';
 
-  // Extract URLs from text
+  // Extract URLs fallback
   const extractUrls = (text) => {
     if (!text) return [];
     const matches = text.match(/https?:\/\/[^\s()<>"]+/g) || [];
     return [...new Set(matches.map((url) => url.replace(/[.,;:)\]]+$/, '')))];
   };
 
-  // Group URLs by agent
-  const agentSources = [
-    { id: 'market', name: 'Market Research', icon: '📊', urls: extractUrls(agentResults?.market) },
-    { id: 'competitor', name: 'Competitor Analysis', icon: '🔎', urls: extractUrls(agentResults?.competitor) },
-    { id: 'financial', name: 'Financial Feasibility', icon: '💰', urls: extractUrls(agentResults?.financial) },
-    { id: 'risk', name: 'Risk Assessment', icon: '⚠️', urls: extractUrls(agentResults?.risk) },
-  ].filter(group => group.urls.length > 0);
-  
-  const hasSources = agentSources.length > 0;
+  const agentSourcesMap = session.agent_sources || {};
+
+  const getAgentSources = (key, name) => {
+    // 1. Structured sources from session.agent_sources
+    if (agentSourcesMap[key] && Array.isArray(agentSourcesMap[key]) && agentSourcesMap[key].length > 0) {
+      return agentSourcesMap[key];
+    }
+    if (key === 'debate' && agentSourcesMap.comparator && agentSourcesMap.comparator.length > 0) {
+      return agentSourcesMap.comparator;
+    }
+    // 2. Fallback to extracting URLs from agent's output text (for older sessions)
+    const text = agentResults[key] || '';
+    const urls = extractUrls(text);
+    return urls.map((url) => {
+      let domain = '';
+      try {
+        domain = new URL(url).hostname.replace('www.', '');
+      } catch (e) {
+        domain = '';
+      }
+      return {
+        title: domain || url,
+        url: url,
+        domain: domain,
+        snippet: `Cited in ${name || key} findings`,
+        supports: `Directly cited in ${name || key} findings.`,
+        agent: name || key,
+        agent_key: key,
+      };
+    });
+  };
+
+  // Group all collected sources across agents
+  const allAgentGroups = [
+    { id: 'market', name: 'Market Research Agent', icon: '📊', sources: getAgentSources('market', 'Market Research Agent') },
+    { id: 'competitor', name: 'Competitor Analysis Agent', icon: '🔎', sources: getAgentSources('competitor', 'Competitor Analysis Agent') },
+    { id: 'financial', name: 'Financial Feasibility Agent', icon: '💰', sources: getAgentSources('financial', 'Financial Feasibility Agent') },
+    { id: 'risk', name: 'Risk Assessment Agent', icon: '⚠️', sources: getAgentSources('risk', 'Risk Assessment Agent') },
+    { id: 'debate', name: 'Comparator / Debate Agent', icon: '⚖️', sources: getAgentSources('debate', 'Comparator / Debate Agent') },
+    { id: 'verdict', name: 'Investor Verdict Agent', icon: '🏆', sources: getAgentSources('verdict', 'Investor Verdict Agent') },
+  ];
+
+  const totalSourcesCount = allAgentGroups.reduce((acc, g) => acc + g.sources.length, 0);
+
+  // Dedicated Component for Research Sources Section
+  function ResearchSourcesSection({
+    sources = [],
+    agentName,
+    emptyMessage = "No external sources collected. Findings were synthesized from domain directives, financial logic, or cross-specialist debate.",
+  }) {
+    const hasSources = sources && sources.length > 0;
+
+    return (
+      <div className="agent-sources-section animate-fade-in">
+        <div className="agent-sources-header">
+          <div className="agent-sources-title-wrap">
+            <span className="agent-sources-icon">🔗</span>
+            <h3 className="agent-sources-heading">
+              {agentName ? `${agentName} — Research Sources` : 'Research Sources'}
+            </h3>
+          </div>
+          <span className={`agent-sources-badge ${hasSources ? 'agent-sources-badge--active' : 'agent-sources-badge--empty'}`}>
+            {hasSources ? `${sources.length} Verified ${sources.length === 1 ? 'Source' : 'Sources'}` : '0 Sources'}
+          </span>
+        </div>
+
+        {hasSources ? (
+          <div className="agent-sources-grid">
+            {sources.map((src, idx) => {
+              let domain = src.domain;
+              if (!domain && src.url) {
+                try {
+                  domain = new URL(src.url).hostname.replace('www.', '');
+                } catch (e) {
+                  domain = '';
+                }
+              }
+              const title = src.title || domain || src.url;
+              const explanation = src.supports || src.snippet;
+
+              return (
+                <div key={src.url || idx} className="source-item-card">
+                  <div className="source-item-header">
+                    <h4 className="source-item-title" title={title}>
+                      {title}
+                    </h4>
+                    {domain && <span className="source-item-domain-badge">{domain}</span>}
+                  </div>
+
+                  <div className="source-item-url-row">
+                    <span className="source-label">URL:</span>
+                    <a
+                      href={src.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="source-item-url-link"
+                      title={src.url}
+                    >
+                      {src.url}
+                    </a>
+                  </div>
+
+                  {explanation && (
+                    <p className="source-item-supports">
+                      <span className="source-label">Supports:</span> {explanation}
+                    </p>
+                  )}
+
+                  {src.agent && (
+                    <div className="source-item-footer">
+                      <span className="source-agent-tag">
+                        Used by: {src.agent}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="agent-sources-empty-state">
+            <span className="empty-state-icon">ℹ️</span>
+            <p className="empty-state-text">{emptyMessage}</p>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="full-report-page animate-fade-in-up">
@@ -200,6 +319,13 @@ export default function FullReportPage() {
                   })}
                 </div>
               </div>
+
+              {/* Research Sources for Verdict / Thesis */}
+              <ResearchSourcesSection
+                sources={getAgentSources('verdict', 'Investor Verdict Agent')}
+                agentName="Investor Verdict Agent"
+                emptyMessage="The Investor Verdict Agent synthesized evidence across all upstream specialist research reports to reach the final viability score."
+              />
             </div>
           )}
 
@@ -218,6 +344,13 @@ export default function FullReportPage() {
               <div className="report-text-container">
                 {agentResults.market ? <MarkdownRenderer content={agentResults.market} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
+
+              {/* Research Sources for Market Research Agent */}
+              <ResearchSourcesSection
+                sources={getAgentSources('market', 'Market Research Agent')}
+                agentName="Market Research Agent"
+                emptyMessage="No external sources collected. Market analysis was derived from general industry knowledge."
+              />
             </div>
           )}
 
@@ -236,6 +369,13 @@ export default function FullReportPage() {
               <div className="report-text-container">
                 {agentResults.competitor ? <MarkdownRenderer content={agentResults.competitor} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
+
+              {/* Research Sources for Competitor Analysis Agent */}
+              <ResearchSourcesSection
+                sources={getAgentSources('competitor', 'Competitor Analysis Agent')}
+                agentName="Competitor Analysis Agent"
+                emptyMessage="No external sources collected. Competitor positioning was evaluated using general category knowledge."
+              />
             </div>
           )}
 
@@ -254,6 +394,13 @@ export default function FullReportPage() {
               <div className="report-text-container">
                 {agentResults.financial ? <MarkdownRenderer content={agentResults.financial} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
+
+              {/* Research Sources for Financial Feasibility Agent */}
+              <ResearchSourcesSection
+                sources={getAgentSources('financial', 'Financial Feasibility Agent')}
+                agentName="Financial Feasibility Agent"
+                emptyMessage="No external sources collected. Financial feasibility was evaluated using unit-economics formulas and founder-stated constraints."
+              />
             </div>
           )}
 
@@ -272,6 +419,13 @@ export default function FullReportPage() {
               <div className="report-text-container">
                 {agentResults.risk ? <MarkdownRenderer content={agentResults.risk} /> : <p className="text-muted-italic">No specific agent output recorded.</p>}
               </div>
+
+              {/* Research Sources for Risk Assessment Agent */}
+              <ResearchSourcesSection
+                sources={getAgentSources('risk', 'Risk Assessment Agent')}
+                agentName="Risk Assessment Agent"
+                emptyMessage="No external sources collected. Risk assessment was derived from standard operational, technical, and regulatory models."
+              />
             </div>
           )}
 
@@ -290,6 +444,13 @@ export default function FullReportPage() {
               <div className="report-text-container">
                 <MarkdownRenderer content={debateResult || 'The Comparator Agent reviewed all four specialist reports. No major un-reconciled contradictions were found.'} />
               </div>
+
+              {/* Research Sources for Debate Agent */}
+              <ResearchSourcesSection
+                sources={getAgentSources('debate', 'Comparator / Debate Agent')}
+                agentName="Comparator / Debate Agent"
+                emptyMessage="No external sources directly cited during debate. The Comparator Agent cross-verified evidence directly from Market, Competitor, Financial, and Risk reports."
+              />
             </div>
           )}
 
@@ -312,32 +473,71 @@ export default function FullReportPage() {
 
         </div>
 
-        {/* Source Citations Section */}
-        {hasSources && (
-          <div className="sources-card">
+        {/* Consolidated Research Sources Section Across All Agents */}
+        <div className="sources-card">
+          <div className="sources-card-header">
             <h3 className="sources-title">
               <span>🔗</span> Research Sources & External Citations
             </h3>
+            <span className={`sources-summary-badge ${totalSourcesCount > 0 ? 'badge-has-sources' : 'badge-empty'}`}>
+              {totalSourcesCount > 0 ? `${totalSourcesCount} Total Sources Verified` : 'No External Sources Collected'}
+            </span>
+          </div>
+
+          {totalSourcesCount > 0 ? (
             <div className="sources-grouped-list">
-              {agentSources.map((group) => (
+              {allAgentGroups.filter((g) => g.sources.length > 0).map((group) => (
                 <div key={group.id} className="source-group">
                   <h4 className="source-group-title">
                     <span className="source-group-icon">{group.icon}</span> {group.name}
+                    <span className="group-count">({group.sources.length})</span>
                   </h4>
-                  <ul className="sources-list">
-                    {group.urls.map((url, i) => (
-                      <li key={i}>
-                        <a href={url} target="_blank" rel="noopener noreferrer" className="source-item-link">
-                          {url}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="sources-items-grid">
+                    {group.sources.map((src, i) => {
+                      let domain = src.domain;
+                      if (!domain && src.url) {
+                        try {
+                          domain = new URL(src.url).hostname.replace('www.', '');
+                        } catch (e) {
+                          domain = '';
+                        }
+                      }
+                      return (
+                        <div key={src.url || i} className="source-item-card">
+                          <div className="source-item-header">
+                            <h5 className="source-item-title">{src.title || domain || 'Source'}</h5>
+                            {domain && <span className="source-item-domain-badge">{domain}</span>}
+                          </div>
+                          <div className="source-item-url-row">
+                            <span className="source-label">URL:</span>
+                            <a href={src.url} target="_blank" rel="noopener noreferrer" className="source-item-url-link">
+                              {src.url}
+                            </a>
+                          </div>
+                          {(src.supports || src.snippet) && (
+                            <p className="source-item-supports">
+                              <span className="source-label">Supports:</span> {src.supports || src.snippet}
+                            </p>
+                          )}
+                          <div className="source-item-footer">
+                            <span className="source-agent-tag">Used by: {group.name}</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               ))}
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="sources-global-empty">
+              <span className="empty-state-icon">ℹ️</span>
+              <p className="empty-state-text">
+                No external sources collected during this validation session. Analysis was produced from internal reasoning and financial models.
+              </p>
+            </div>
+          )}
+        </div>
 
         {/* Agent Navigation Section */}
         <div className="report-agents-nav-section">

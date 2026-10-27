@@ -130,6 +130,7 @@ class ValidateResponse(BaseModel):
     recommendation: str | None = Field(None, description="Go or No-Go")
     justification: str | None = Field(None, description="Verdict justification text")
     agent_results: dict[str, str] = Field(default_factory=dict, description="Outputs from individual research agents")
+    agent_sources: dict[str, list[dict]] = Field(default_factory=dict, description="Agent-specific research sources")
 
 
 class ValidationStartResponse(BaseModel):
@@ -140,6 +141,9 @@ class ValidationStartResponse(BaseModel):
 class SourceItem(BaseModel):
     title: str = Field(..., description="Domain or title of source")
     url: str = Field(..., description="Clickable source URL")
+    domain: str | None = Field(None, description="Domain name")
+    snippet: str | None = Field(None, description="Source snippet")
+    supports: str | None = Field(None, description="What information the source supports")
 
 
 class FollowUpRequest(BaseModel):
@@ -170,7 +174,7 @@ class FollowUpResponse(BaseModel):
 def _parse_pipeline_output(raw: str) -> dict:
     """Extract structured fields from the free-form pipeline string."""
     score_match = re.search(r"Score[:\s*]+([\d.]+)\s*/\s*10", raw, re.IGNORECASE)
-    rec_match = re.search(r"Recommendation[:\s*]+(Go|No-?Go)\b", raw, re.IGNORECASE)
+    rec_match = re.search(r"Recommendation[:\s*]+([^\n\r]+)", raw, re.IGNORECASE)
     just_match = re.search(r"Justification[:\s*]+([\s\S]+)", raw, re.IGNORECASE)
 
     score = None
@@ -185,7 +189,12 @@ def _parse_pipeline_output(raw: str) -> dict:
 
     if rec_match:
         rec_raw = rec_match.group(1).strip()
-        recommendation = "No-Go" if "no" in rec_raw.lower() else "Go"
+        if "no" in rec_raw.lower() or "not" in rec_raw.lower():
+            recommendation = "No-Go"
+        elif "go" in rec_raw.lower() or "validate" in rec_raw.lower():
+            recommendation = "Go"
+        else:
+            recommendation = "No-Go" if (score is not None and score < 6.0) else "Go"
 
     if just_match:
         justification = just_match.group(1).strip()
@@ -265,7 +274,10 @@ def _run_followup_background(request_id: str, session_id: str,
                 "message": "Running full 7-agent revalidation pipeline…",
             })
             try:
-                raw_result, agent_outputs = run_validation_pipeline(idea)
+                pipeline_res = run_validation_pipeline(idea)
+                raw_result = pipeline_res[0]
+                agent_outputs = pipeline_res[1]
+                agent_sources = pipeline_res[2] if len(pipeline_res) > 2 else agent_outputs.get("_agent_sources", {})
             except Exception as exc:
                 _emit({"type": "followup_error",
                         "message": f"Revalidation failed: {str(exc)[:200]}"})
@@ -280,6 +292,7 @@ def _run_followup_background(request_id: str, session_id: str,
                     "justification": parsed["justification"],
                 },
                 "agent_results": agent_outputs,
+                "agent_sources": agent_sources,
                 "debate_result": agent_outputs.get("comparator", ""),
                 "verdict_result": agent_outputs.get("verdict", raw_result),
             })
@@ -420,11 +433,14 @@ def _run_validation_background(session_id: str, idea: str):
         emit_pipeline_event(session_id, event)
 
     try:
-        raw_result, agent_outputs = run_validation_pipeline(
+        pipeline_res = run_validation_pipeline(
             idea,
             event_emitter=cancellation_aware_emitter,
             cancel_check=lambda: _is_cancelled(session_id),
         )
+        raw_result = pipeline_res[0]
+        agent_outputs = pipeline_res[1]
+        agent_sources = pipeline_res[2] if len(pipeline_res) > 2 else agent_outputs.get("_agent_sources", {})
 
         # Check if cancelled after pipeline finished
         if _is_cancelled(session_id):
@@ -445,6 +461,7 @@ def _run_validation_background(session_id: str, idea: str):
             "justification": parsed["justification"],
         }
         session["agent_results"] = agent_outputs
+        session["agent_sources"] = agent_sources
         session["debate_result"] = agent_outputs.get("comparator", "") or agent_outputs.get("debate", "")
         session["verdict_result"] = agent_outputs.get("verdict", raw_result)
         if "conversation" not in session or session["conversation"] is None:
@@ -542,6 +559,7 @@ def start_validation(req: ValidateRequest):
         "result_ready": False,
         "event_log": [],
         "agent_results": {},
+        "agent_sources": {},
         "validation_result": {},
         "conversation": [],
     }
@@ -772,7 +790,10 @@ def validate_idea(req: ValidateRequest):
     idea_clean = req.idea.strip()
 
     try:
-        raw_result, agent_outputs = run_validation_pipeline(idea_clean)
+        pipeline_res = run_validation_pipeline(idea_clean)
+        raw_result = pipeline_res[0]
+        agent_outputs = pipeline_res[1]
+        agent_sources = pipeline_res[2] if len(pipeline_res) > 2 else agent_outputs.get("_agent_sources", {})
     except Exception as e:
         logger.exception("Validation pipeline failed")
         raise HTTPException(status_code=500, detail=f"Pipeline error: {type(e).__name__}: {str(e)}")
@@ -790,6 +811,7 @@ def validate_idea(req: ValidateRequest):
             "justification": parsed["justification"],
         },
         "agent_results": agent_outputs,
+        "agent_sources": agent_sources,
         "debate_result": agent_outputs.get("comparator", ""),
         "verdict_result": agent_outputs.get("verdict", raw_result),
         "conversation": [
@@ -814,6 +836,7 @@ def validate_idea(req: ValidateRequest):
         recommendation=parsed["recommendation"],
         justification=parsed["justification"],
         agent_results=agent_outputs,
+        agent_sources=agent_sources,
     )
 
 
@@ -884,7 +907,10 @@ def follow_up(req: FollowUpRequest):
     if category == "revalidate":
         idea = session.get("startup_idea") or req.idea or question
         try:
-            raw_result, agent_outputs = run_validation_pipeline(idea)
+            pipeline_res = run_validation_pipeline(idea)
+            raw_result = pipeline_res[0]
+            agent_outputs = pipeline_res[1]
+            agent_sources = pipeline_res[2] if len(pipeline_res) > 2 else agent_outputs.get("_agent_sources", {})
         except Exception as e:
             logger.exception("Revalidation failed")
             raise HTTPException(status_code=500, detail=f"Revalidation error: {str(e)}")
@@ -899,6 +925,7 @@ def follow_up(req: FollowUpRequest):
             "justification": parsed["justification"],
         }
         session["agent_results"] = agent_outputs
+        session["agent_sources"] = agent_sources
         session["debate_result"] = agent_outputs.get("comparator", "")
         session["verdict_result"] = agent_outputs.get("verdict", raw_result)
 
