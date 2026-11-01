@@ -9,3 +9,4 @@ cerebras-cloud-sdk
 requests
 fastapi
 uvicorn[standard]
+gunicorn
