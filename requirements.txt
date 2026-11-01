@@ -1,5 +1,6 @@
 crewai
 crewai-tools
+tiktoken>=0.8.0
 google-adk
 langfuse
 mcp
