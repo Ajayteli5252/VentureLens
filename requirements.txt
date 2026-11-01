@@ -3,7 +3,7 @@ crewai-tools
 tiktoken>=0.8.0
 google-adk
 langfuse
-mcp
+mcp<2
 python-dotenv==1.0.1
 cerebras-cloud-sdk
 requests

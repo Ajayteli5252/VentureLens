@@ -15,7 +15,19 @@ import sys
 import json
 import requests
 from urllib.parse import urlparse
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except (ImportError, ModuleNotFoundError):
+    try:
+        from mcp.server.mcpserver import MCPServer as FastMCP
+    except Exception:
+        class FastMCP:
+            def __init__(self, name: str = "VentureLens-Tools-Server"):
+                self.name = name
+            def tool(self, name: str = None, description: str = None):
+                def decorator(func):
+                    return func
+                return decorator
 
 # Initialize FastMCP Server
 mcp_server = FastMCP(name="VentureLens-Tools-Server")
