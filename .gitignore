@@ -30,3 +30,8 @@ frontend/dist/
 
 # Local session store
 sessions_store.json
+
+# Local storage and runtime traces
+.localappdata/
+traces/
+logs/

@@ -207,9 +207,16 @@ def execute_single_agent_followup(category: str, question: str, session: dict,
         except Exception:
             pass
 
-    # Register the search tool emitter for this thread so search_started /
+    from guardrails import InputGuardrail
+    is_safe, error_msg, clean_q = InputGuardrail.validate_prompt(question)
+    if not is_safe:
+        _emit({'type': 'guardrail_blocked', 'message': error_msg})
+        return (f'Security Guardrail Notice: {error_msg}', [], [])
+    question = clean_q
+
+    # Register the MCP search tool emitter for this thread so search_started /
     # source_found events flow into the same queue (thread-local, zero leakage).
-    from tools.search_tool import (
+    from tools.mcp_tools import (
         set_search_event_emitter,
         clear_search_event_emitter,
         init_thread_sources,

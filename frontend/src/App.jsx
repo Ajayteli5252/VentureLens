@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Header from './components/Header';
 import ErrorBoundary from './components/ErrorBoundary';
 import LandingPage from './pages/LandingPage';
@@ -11,7 +11,7 @@ import './index.css';
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <div className="app-shell">
         <Header />
         <main className="main-content">
@@ -28,6 +28,6 @@ export default function App() {
           </ErrorBoundary>
         </main>
       </div>
-    </BrowserRouter>
+    </HashRouter>
   );
 }

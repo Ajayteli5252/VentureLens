@@ -1,5 +1,8 @@
 crewai
 crewai-tools
+google-adk
+langfuse
+mcp
 python-dotenv==1.0.1
 cerebras-cloud-sdk
 requests

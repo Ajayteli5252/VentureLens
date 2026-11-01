@@ -2,7 +2,7 @@ name: Deploy Frontend to GitHub Pages
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "changes"]
   workflow_dispatch:
 
 permissions:
@@ -36,7 +36,9 @@ jobs:
         working-directory: frontend
 
       - name: Build React application
-        run: npm run build
+        run: |
+          npm run build
+          cp dist/index.html dist/404.html
         working-directory: frontend
 
       - name: Setup GitHub Pages

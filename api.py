@@ -25,6 +25,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from crew import run_validation_pipeline
+from a2a_protocol import get_crewai_agent_card, A2ATaskRequest, A2ATaskResponse
+from adk_agent import ADKOrchestrationController
+from state import ValidationState
+from evaluation import BENCHMARK_IDEAS
+from callbacks import TRACE_LOG_PATH
 from followup import (
     route_question,
     execute_single_agent_followup,
@@ -131,6 +136,11 @@ class ValidateResponse(BaseModel):
     justification: str | None = Field(None, description="Verdict justification text")
     agent_results: dict[str, str] = Field(default_factory=dict, description="Outputs from individual research agents")
     agent_sources: dict[str, list[dict]] = Field(default_factory=dict, description="Agent-specific research sources")
+    verdict_markdown: str | None = Field(None, description="Structured Markdown verdict representation")
+    verdict_table: str | None = Field(None, description="Structured Table verdict representation")
+    verdict_json: dict | None = Field(None, description="Structured JSON verdict representation")
+    performance_metrics: dict | None = Field(None, description="Performance, latency and token cost metrics")
+    validation_state: dict | None = Field(None, description="State machine transitions summary")
 
 
 class ValidationStartResponse(BaseModel):
@@ -464,6 +474,11 @@ def _run_validation_background(session_id: str, idea: str):
         session["agent_sources"] = agent_sources
         session["debate_result"] = agent_outputs.get("comparator", "") or agent_outputs.get("debate", "")
         session["verdict_result"] = agent_outputs.get("verdict", raw_result)
+        session["verdict_markdown"] = agent_outputs.get("_verdict_markdown")
+        session["verdict_table"] = agent_outputs.get("_verdict_table")
+        session["verdict_json"] = agent_outputs.get("_verdict_report")
+        session["performance_metrics"] = agent_outputs.get("_performance_metrics")
+        session["validation_state"] = agent_outputs.get("_validation_state")
         if "conversation" not in session or session["conversation"] is None:
             session["conversation"] = []
         if not session["conversation"]:
@@ -1035,3 +1050,82 @@ def follow_up(req: FollowUpRequest):
         is_revalidation=False,
         suggested_followups=result.get("suggested_followups", []),
     )
+
+
+# ---------------------------------------------------------------------------
+# Requirement 6 & 7: A2A Protocol & Google ADK Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/.well-known/agent-card.json")
+def get_a2a_agent_card():
+    """Official A2A Protocol Agent Card discovery endpoint (Criterion 6)."""
+    return get_crewai_agent_card()
+
+
+@app.post("/a2a/v1/tasks")
+def execute_a2a_task(request: A2ATaskRequest):
+    """A2A Protocol JSON-RPC 2.0 task delegation endpoint (Criterion 6)."""
+    params = request.params or {}
+    skill = params.get("skill", "validate_startup_idea")
+    args = params.get("arguments", {})
+    idea = args.get("idea", "")
+    if not idea:
+        return {"jsonrpc": "2.0", "id": request.id, "error": {"code": -32602, "message": "Missing idea argument"}}
+
+    verdict, outputs, sources = run_validation_pipeline(idea)
+    return {
+        "jsonrpc": "2.0",
+        "id": request.id,
+        "result": {
+            "status": "completed",
+            "verdict_output": verdict,
+            "verdict_report": outputs.get("_verdict_report"),
+            "agent_outputs": outputs,
+            "framework": "CrewAI",
+        }
+    }
+
+
+@app.post("/api/validate-adk")
+def validate_with_adk(req: ValidateRequest):
+    """Validates idea via Google ADK Executive Director delegating to CrewAI over A2A (Criterion 6 & 7)."""
+    controller = ADKOrchestrationController()
+    state = ValidationState(session_id=str(uuid.uuid4()), idea=req.idea.strip())
+    result = controller.delegate_validation_via_a2a(
+        state=state,
+        crewai_execution_fn=run_validation_pipeline,
+    )
+    return {
+        "status": "completed",
+        "orchestrator": "Google ADK (Executive Director)",
+        "executor": "CrewAI 7-Agent Crew",
+        "protocol": "A2A (Agent-to-Agent)",
+        "result": result,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Requirement 5, 9 & 10: Evaluation, Auditing & Provenance Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/evaluation/benchmarks")
+def get_evaluation_benchmarks():
+    """Returns the benchmark test battery for end-to-end evaluation (Criterion 10)."""
+    return {"benchmarks": BENCHMARK_IDEAS}
+
+
+@app.get("/api/audit/logs/{session_id}")
+def get_audit_logs(session_id: str):
+    """Returns monitoring callback execution trace records for a session (Criterion 5 & 9)."""
+    records = []
+    if TRACE_LOG_PATH.exists():
+        try:
+            with open(TRACE_LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        data = json.loads(line)
+                        if data.get("session_id") == session_id:
+                            records.append(data)
+        except Exception as e:
+            logger.warning("Could not read trace logs: %s", e)
+    return {"session_id": session_id, "trace_records": records, "count": len(records)}

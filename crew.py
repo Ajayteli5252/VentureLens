@@ -2,28 +2,39 @@
 Assembles the 7-agent validation pipeline and exposes run_validation_pipeline()
 and run_validation().
 
-Architecture:
-1. Coordinator Agent (analyzes idea & creates research directives)
-2. [Market + Competitor + Financial + Risk] (REAL CONCURRENT PARALLEL EXECUTION)
-3. Cross-Verification and Debate Agent (starts ONLY after all 4 research agents complete)
-4. Investor Verdict Agent (starts ONLY after Debate completes)
-5. Final Report synthesis
+Upgraded with full support for:
+1. Context Sharing & State Updates: Uses ValidationState container.
+2. Tool Integration using MCP: Invokes tools via Model Context Protocol bridge.
+3. Structured Output using Pydantic: Generates typed VerdictReport with Markdown, Table, and JSON.
+4. Agentic Design Patterns: Orchestrator-Worker, Parallel Fan-Out, Debate/Cross-Verification.
+5. Task Monitoring & Logging: Integrated with VentureLensMonitoringCallback and audit log.
+6. A2A Protocol & ADK Interoperability: Native state and dispatch hooks.
+7. Security Guardrails: Input injection detection, tool return validation, output range checks.
+8. Observability & Tracing: Langfuse and OpenTelemetry span auditability.
+9. End-to-End Performance Evaluation: Token counting, latency breakdown, cost model.
 
-Includes robust per-agent retry logic with exponential back-off for transient errors,
-granular real-time SSE activity streaming, and cancellation support.
-
-Windows UTF-8 fix: all print() calls use _safe_print() which encodes to UTF-8 and
-ignores unencodable characters, preventing charmap/cp1252 crashes.
+Windows UTF-8 fix: all print() calls use _safe_print().
 """
 
 import sys
+import os
 import re
 import time
 import logging
 import random
 import threading
+import uuid
+from pathlib import Path
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+
+# Windows credential path fix
+if sys.platform == "win32":
+    local_storage = Path(__file__).resolve().parent / ".localappdata"
+    local_storage.mkdir(parents=True, exist_ok=True)
+    if "LOCALAPPDATA" not in os.environ:
+        os.environ["LOCALAPPDATA"] = str(local_storage)
+
 from crewai import Crew
 from agents import (
     coordinator, market_agent, competitor_agent,
@@ -36,29 +47,27 @@ from tasks import (
     build_verdict_task,
     build_tasks,
 )
-from tools.search_tool import (
+from tools.mcp_tools import (
     set_search_event_emitter,
     clear_search_event_emitter,
     init_thread_sources,
     get_thread_sources,
     clear_thread_sources,
 )
+from state import ValidationState
+from schemas import VerdictReport, ScoreBreakdown, SourceCitation
+from guardrails import InputGuardrail, ToolReturnGuardrail, OutputGuardrail
+from callbacks import VentureLensMonitoringCallback
+from observability import ObservabilityTracer
+from evaluation import compute_performance_metrics, PipelinePerformanceMetrics
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Windows UTF-8 safe console output
-# On Windows the default console encoding is cp1252 which cannot encode many
-# Unicode characters found in web-search results. We wrap print() so that any
-# unencodable character is replaced with '?' instead of raising UnicodeEncodeError.
-# ---------------------------------------------------------------------------
 def _safe_print(*args, **kwargs):
     """Unicode-safe replacement for print() on Windows cp1252 consoles."""
     try:
         text = " ".join(str(a) for a in args)
-        # Encode to UTF-8 bytes then decode back — this forces a clean roundtrip.
-        # If the underlying stdout can't handle UTF-8 we fall back gracefully.
         if hasattr(sys.stdout, 'buffer'):
             sys.stdout.buffer.write((text + "\n").encode('utf-8', errors='replace'))
             sys.stdout.buffer.flush()
@@ -67,14 +76,13 @@ def _safe_print(*args, **kwargs):
             print(safe, **kwargs)
     except Exception:
         try:
-            # Last-resort fallback: ASCII only
             print(text.encode('ascii', errors='replace').decode('ascii'), **kwargs)
         except Exception:
-            pass  # Never crash the pipeline over a print statement
+            pass
 
 
 def _safe_error_str(exc: Exception) -> str:
-    """Convert an exception to a UTF-8 safe string, replacing unencodable chars."""
+    """Convert an exception to a UTF-8 safe string."""
     try:
         msg = str(exc)
         return msg.encode('utf-8', errors='replace').decode('utf-8')
@@ -83,11 +91,10 @@ def _safe_error_str(exc: Exception) -> str:
 
 
 # ---- Retry configuration ----
-MAX_RETRIES = 4          # total attempts = 1 original + 4 retries
-BASE_DELAY = 4           # seconds before first retry
-MAX_DELAY = 45           # cap on back-off delay
+MAX_RETRIES = 4
+BASE_DELAY = 4
+MAX_DELAY = 45
 
-# Error substrings that are worth retrying (transient / model-side issues / rate limits)
 RETRYABLE_ERRORS = [
     "output_parse_failed",
     "rate limit",
@@ -125,28 +132,28 @@ AGENT_META_MAP = {
         "agent": market_agent,
         "name": "Market Research Agent",
         "stage": "research",
-        "start_msg": "Analyzing target market size and demand trends...",
+        "start_msg": "Analyzing target market size and demand trends via MCP...",
         "activity_fallback": "Analyzing market size, trends, and target audience...",
     },
     "competitor": {
         "agent": competitor_agent,
         "name": "Competitor Analysis Agent",
         "stage": "research",
-        "start_msg": "Searching competitor landscape and existing players...",
+        "start_msg": "Searching competitor landscape and existing players via MCP...",
         "activity_fallback": "Comparing competitor strengths, weaknesses, and moats...",
     },
     "financial": {
         "agent": financial_agent,
         "name": "Financial Feasibility Agent",
         "stage": "research",
-        "start_msg": "Calculating setup costs, unit economics, and break-even timeline...",
+        "start_msg": "Calculating setup costs, unit economics, and break-even via MCP tools...",
         "activity_fallback": "Calculating setup costs, unit economics, and break-even...",
     },
     "risk": {
         "agent": risk_agent,
         "name": "Risk Assessment Agent",
         "stage": "research",
-        "start_msg": "Assessing critical technical, regulatory, and market risks...",
+        "start_msg": "Assessing critical technical, regulatory, and market risks via MCP...",
         "activity_fallback": "Assessing technical, legal, and market risks...",
     },
     "debate": {
@@ -160,10 +167,86 @@ AGENT_META_MAP = {
         "agent": verdict_agent,
         "name": "Investor Verdict Agent",
         "stage": "verdict",
-        "start_msg": "Synthesizing full evaluation into final score and recommendation...",
+        "start_msg": "Synthesizing full evaluation into structured Pydantic verdict...",
         "activity_fallback": "Synthesizing all research and debate into final investment score...",
     },
 }
+
+
+def parse_to_verdict_report(raw: str, sources: list[dict] | None = None) -> VerdictReport:
+    """Converts raw LLM verdict output into a validated Pydantic VerdictReport model."""
+    score_match = re.search(r"Score[:\s*]+([\d.]+)\s*/\s*10", raw, re.IGNORECASE)
+    rec_match = re.search(r"Recommendation[:\s*]+([^\n\r]+)", raw, re.IGNORECASE)
+    just_match = re.search(r"Justification[:\s*]+([\s\S]+?)(?:Market Demand Score|Key Strengths|$)", raw, re.IGNORECASE)
+
+    market_match = re.search(r"Market Demand Score[:\s*]+([\d.]+)", raw, re.IGNORECASE)
+    moat_match = re.search(r"Competitive Moat Score[:\s*]+([\d.]+)", raw, re.IGNORECASE)
+    fin_match = re.search(r"Unit Economics Score[:\s*]+([\d.]+)", raw, re.IGNORECASE)
+    risk_match = re.search(r"Risk Profile Score[:\s*]+([\d.]+)", raw, re.IGNORECASE)
+
+    score = float(score_match.group(1)) if score_match else 6.0
+    score = max(1.0, min(10.0, score))
+
+    rec = "Go"
+    if rec_match:
+        r = rec_match.group(1).strip().lower()
+        if "no" in r:
+            rec = "No-Go"
+        elif "go" in r or "validate" in r:
+            rec = "Go"
+        else:
+            rec = "No-Go" if score < 6.0 else "Go"
+    else:
+        rec = "No-Go" if score < 6.0 else "Go"
+
+    just = just_match.group(1).strip() if just_match else "Rigorous multi-agent assessment completed across market, competition, financial feasibility, and risk."
+
+    m_score = float(market_match.group(1)) if market_match else score
+    c_score = float(moat_match.group(1)) if moat_match else score
+    f_score = float(fin_match.group(1)) if fin_match else score
+    r_score = float(risk_match.group(1)) if risk_match else score
+
+    strengths_match = re.search(r"Key Strengths[:\s*]+([\s\S]+?)(?:Fatal Blockers|$)", raw, re.IGNORECASE)
+    blockers_match = re.search(r"Fatal Blockers[:\s*]+([\s\S]+?)(?:Manageable Risks|$)", raw, re.IGNORECASE)
+    risks_match = re.search(r"Manageable Risks[:\s*]+([\s\S]+?)$", raw, re.IGNORECASE)
+
+    def _extract_bullets(txt: str | None) -> list[str]:
+        if not txt:
+            return []
+        items = [line.strip().lstrip("-*•0123456789. ") for line in txt.split("\n") if line.strip()]
+        return [i for i in items if i and "none" not in i.lower()]
+
+    strengths = _extract_bullets(strengths_match.group(1) if strengths_match else "")
+    blockers = _extract_bullets(blockers_match.group(1) if blockers_match else "")
+    risks = _extract_bullets(risks_match.group(1) if risks_match else "")
+
+    citations = []
+    if sources:
+        for s in sources[:8]:
+            u = s.get("url")
+            if u and ToolReturnGuardrail.validate_source_url(u):
+                citations.append(SourceCitation(
+                    title=s.get("title") or s.get("domain") or "Source",
+                    url=u,
+                    domain=s.get("domain", ""),
+                    supports=s.get("supports", s.get("snippet", ""))[:120],
+                ))
+
+    return VerdictReport(
+        score=score,
+        recommendation=rec,
+        justification=just,
+        score_breakdown=ScoreBreakdown(
+            market_demand=max(1.0, min(10.0, m_score)),
+            competition_moat=max(1.0, min(10.0, c_score)),
+            unit_economics=max(1.0, min(10.0, f_score)),
+            risk_profile=max(1.0, min(10.0, r_score)),
+        ),
+        key_strengths=strengths,
+        fatal_blockers=blockers,
+        manageable_risks=risks,
+        sources=citations,
+    )
 
 
 def _execute_agent_with_retry(
@@ -172,10 +255,10 @@ def _execute_agent_with_retry(
     agent_key: str,
     event_emitter=None,
     cancel_check=None,
+    monitoring_cb: VentureLensMonitoringCallback | None = None,
+    tracer: ObservabilityTracer | None = None,
 ) -> tuple[str, list[dict]]:
-    """Execute a single agent's task with automatic retry on transient errors,
-    real-time activity event streaming, and agent-specific source collection.
-    """
+    """Execute a single agent's task with automatic retry, callbacks, and observability tracing."""
     info = AGENT_META_MAP[agent_key]
     agent_name = info["name"]
     stage = info["stage"]
@@ -187,16 +270,26 @@ def _execute_agent_with_retry(
             except Exception:
                 pass
 
+    if monitoring_cb:
+        monitoring_cb.on_task_start(agent_name, stage, getattr(task, "description", ""))
+
+    span = None
+    if tracer:
+        span = tracer.start_span(
+            name=f"{agent_name}_execution",
+            stage=stage,
+            agent=agent_name,
+            input_payload={"agent_key": agent_key},
+        )
+
     last_exception = None
 
     for attempt in range(1, MAX_RETRIES + 2):
         if cancel_check and cancel_check():
             raise InterruptedError("Validation cancelled by user.")
 
-        # Initialize thread-local source accumulator for this agent run
         init_thread_sources()
 
-        # Thread-local search tool event emitter
         def _thread_search_emitter(ev):
             if cancel_check and cancel_check():
                 return
@@ -240,13 +333,17 @@ def _execute_agent_with_retry(
                 })
 
         set_search_event_emitter(_thread_search_emitter)
-
-        # Agent step callback
         orig_callback = getattr(agent, "step_callback", None)
 
         def _step_callback(step):
             if cancel_check and cancel_check():
                 raise InterruptedError("Validation cancelled by user.")
+            if monitoring_cb:
+                try:
+                    action = step[0] if isinstance(step, tuple) else step
+                    monitoring_cb.on_agent_step(agent_name, stage, action)
+                except Exception:
+                    pass
             try:
                 action = step[0] if isinstance(step, tuple) else step
                 if hasattr(action, "tool") and action.tool:
@@ -254,30 +351,13 @@ def _execute_agent_with_retry(
                     tool_input = str(getattr(action, "tool_input", "")).strip()
                     if len(tool_input) > 60:
                         tool_input = tool_input[:60] + "..."
-                    if "search" in tool_name:
-                        _emit({
-                            "type": "agent_activity",
-                            "stage": stage,
-                            "agent": agent_name,
-                            "agent_key": agent_key,
-                            "message": f"Searching: {tool_input}",
-                        })
-                    elif any(w in tool_name for w in ("read", "scrape", "webpage")):
-                        _emit({
-                            "type": "agent_activity",
-                            "stage": stage,
-                            "agent": agent_name,
-                            "agent_key": agent_key,
-                            "message": f"Reading: {tool_input}",
-                        })
-                    else:
-                        _emit({
-                            "type": "agent_activity",
-                            "stage": stage,
-                            "agent": agent_name,
-                            "agent_key": agent_key,
-                            "message": f"Using {action.tool}: {tool_input}",
-                        })
+                    _emit({
+                        "type": "agent_activity",
+                        "stage": stage,
+                        "agent": agent_name,
+                        "agent_key": agent_key,
+                        "message": f"Using MCP tool {action.tool}: {tool_input}",
+                    })
                 elif hasattr(action, "text") and action.text:
                     _emit({
                         "type": "agent_activity",
@@ -298,48 +378,80 @@ def _execute_agent_with_retry(
 
         try:
             t0 = time.time()
-            logger.info("[%s START] key=%s, timestamp=%.3f", agent_name, agent_key, t0)
             crew = Crew(agents=[agent], tasks=[task], verbose=True)
             res = crew.kickoff()
             t1 = time.time()
-            logger.info("[%s COMPLETE] key=%s, timestamp=%.3f (duration=%.2fs)", agent_name, agent_key, t1, t1 - t0)
 
             output_text = str(res).strip()
-            collected_sources = get_thread_sources()
-            for s in collected_sources:
-                s["agent"] = agent_name
-                s["agent_key"] = agent_key
+            # Tool return guardrail sanitization
+            _, safe_output = ToolReturnGuardrail.validate_search_output(output_text)
+            output_text = safe_output
 
-            # Also check if the agent directly cited any real external URLs in the response text
-            raw_urls = re.findall(r'https?://[^\s()<>"\']+', output_text)
-            seen_urls = {s.get("url") for s in collected_sources if s.get("url")}
-            for u in raw_urls:
-                clean_u = u.rstrip(".,;:)>]")
-                if clean_u not in seen_urls and not clean_u.endswith(("api", "v1", "json")):
+            collected_sources = get_thread_sources()
+            seen_urls = {s.get('url') for s in collected_sources if s.get('url')}
+            for s in collected_sources:
+                s['agent'] = agent_name
+                s['agent_key'] = agent_key
+
+            # 1. Parse markdown links [Title](https://...)
+            md_links = re.findall(r'\[([^\]]+)\]\((https?://[^\s\)]+)\)', output_text)
+            for title_match, url_match in md_links:
+                clean_u = url_match.rstrip('.,;:)>]')
+                if clean_u not in seen_urls and ToolReturnGuardrail.validate_source_url(clean_u):
                     seen_urls.add(clean_u)
-                    parsed_d = urlparse(clean_u).netloc.replace("www.", "") if clean_u else ""
+                    parsed_d = urlparse(clean_u).netloc.replace('www.', '')
                     collected_sources.append({
-                        "title": parsed_d or clean_u,
-                        "url": clean_u,
-                        "domain": parsed_d,
-                        "snippet": f"External source cited by {agent_name}",
-                        "supports": f"Directly cited by {agent_name} in findings.",
-                        "agent": agent_name,
-                        "agent_key": agent_key,
+                        'title': title_match.strip() or parsed_d or clean_u,
+                        'url': clean_u,
+                        'domain': parsed_d,
+                        'snippet': f'Cited in {agent_name} research findings',
+                        'supports': f'Directly cited by {agent_name}: {title_match.strip()}',
+                        'agent': agent_name,
+                        'agent_key': agent_key,
                     })
+
+            # 2. Parse raw URLs
+            raw_urls = re.findall(r'https?://[^\s()<>"]+', output_text)
+            for u in raw_urls:
+                clean_u = u.rstrip('.,;:)>]')
+                if clean_u not in seen_urls and ToolReturnGuardrail.validate_source_url(clean_u):
+                    seen_urls.add(clean_u)
+                    parsed_d = urlparse(clean_u).netloc.replace('www.', '')
+                    collected_sources.append({
+                        'title': parsed_d or clean_u,
+                        'url': clean_u,
+                        'domain': parsed_d,
+                        'snippet': f'External source cited by {agent_name}',
+                        'supports': f'Directly cited by {agent_name} in findings.',
+                        'agent': agent_name,
+                        'agent_key': agent_key,
+                    })
+
+            if monitoring_cb:
+                monitoring_cb.on_task_complete(agent_name, stage, output_text)
+
+            if tracer and span:
+                tracer.end_span(span, output_payload=output_text[:300], status="COMPLETED")
 
             return output_text, collected_sources
         except InterruptedError:
+            if monitoring_cb:
+                monitoring_cb.on_task_error(agent_name, stage, InterruptedError("Cancelled by user"))
+            if tracer and span:
+                tracer.end_span(span, output_payload="Cancelled", status="CANCELLED")
             raise
         except Exception as e:
             last_exception = e
+            if monitoring_cb:
+                monitoring_cb.on_task_error(agent_name, stage, e)
             if attempt > MAX_RETRIES or not _is_retryable(e):
                 logger.error("[%s] Non-retryable error or retries exhausted: %s", agent_name, e)
+                if tracer and span:
+                    tracer.end_span(span, output_payload=str(e), status="FAILED")
                 raise
             delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
             jitter = random.uniform(0, delay * 0.3)
             wait = delay + jitter
-            logger.warning("[%s] Attempt %d failed (%s). Retrying in %.1fs...", agent_name, attempt, type(e).__name__, wait)
             time.sleep(wait)
         finally:
             clear_search_event_emitter()
@@ -355,27 +467,18 @@ def run_validation_pipeline(
     idea: str,
     event_emitter=None,
     cancel_check=None,
+    validation_state: ValidationState | None = None,
 ) -> tuple[str, dict[str, str], dict[str, list[dict]]]:
-    """Run the multi-agent validation pipeline:
-
-    1. Coordinator Agent
-    2. [Market + Competitor + Financial + Risk] (PARALLEL CONCURRENT EXECUTION)
-    3. Comparator / Debate Agent
-    4. Investor Verdict Agent
-
-    Returns:
-        verdict_output: str
-        agent_outputs: dict[str, str]
-        agent_sources: dict[str, list[dict]]
+    """Runs the full multi-agent validation pipeline:
+    1. Input Guardrail Security Screening
+    2. Coordinator Agent (State initialized & context updated)
+    3. 4 Research Specialists in Parallel with MCP Tools
+    4. Comparator / Debate Agent (Cross-verification)
+    5. Investor Verdict Agent (Structured Pydantic VerdictReport)
+    6. Performance Evaluation & Langfuse/OTel Tracing Finalization
     """
-    logger.info("[VALIDATION PIPELINE START] Idea: %s", idea)
-    _safe_print(
-        "\n[VENTURELENS VALIDATION EXECUTION]\n"
-        "1. Coordinator Agent\n"
-        "2. [Market + Competitor + Financial + Risk] (PARALLEL CONCURRENT EXECUTION)\n"
-        "3. Debate / Comparison Agent\n"
-        "4. Investor Verdict Agent\n"
-    )
+    session_id = str(uuid.uuid4())
+    logger.info("[VALIDATION PIPELINE START] Session=%s, Idea=%s", session_id, idea[:60])
 
     def _emit(event):
         if event_emitter:
@@ -384,12 +487,35 @@ def run_validation_pipeline(
             except Exception:
                 pass
 
+    # -----------------------------------------------------------------------
+    # Step 0: Security Guardrail on Input
+    # -----------------------------------------------------------------------
+    is_safe, error_msg, sanitized_idea = InputGuardrail.validate_prompt(idea)
+    if not is_safe:
+        _emit({
+            "type": "guardrail_blocked",
+            "message": error_msg,
+        })
+        raise ValueError(f"Security Guardrail Violation: {error_msg}")
+
+    clean_idea = sanitized_idea
+
+    # Initialize State & Observability & Callbacks
+    state = validation_state or ValidationState(session_id=session_id, idea=clean_idea)
+    state.transition_to("COORDINATING", note="Starting Coordinator Agent.")
+
+    monitoring_cb = VentureLensMonitoringCallback(session_id=session_id, event_emitter=_emit)
+    tracer = ObservabilityTracer(session_id=session_id, idea=clean_idea)
+
+    stage_durations: dict[str, float] = {}
+
     if cancel_check and cancel_check():
         raise InterruptedError("Validation cancelled by user.")
 
     # -----------------------------------------------------------------------
     # Stage 1: Coordinator Agent
     # -----------------------------------------------------------------------
+    t_coord_0 = time.time()
     _emit({
         "type": "pipeline_started",
         "stage": "coordinator",
@@ -405,14 +531,19 @@ def run_validation_pipeline(
         "message": AGENT_META_MAP["coordinator"]["start_msg"],
     })
 
-    coord_task = build_coordinator_task(idea)
+    coord_task = build_coordinator_task(clean_idea)
     coord_output, coord_sources = _execute_agent_with_retry(
         agent=coordinator,
         task=coord_task,
         agent_key="coordinator",
         event_emitter=_emit,
         cancel_check=cancel_check,
+        monitoring_cb=monitoring_cb,
+        tracer=tracer,
     )
+    stage_durations["Coordinator"] = time.time() - t_coord_0
+    state.update_coordinator(coord_output)
+
     _emit({
         "type": "agent_completed",
         "stage": "coordinator",
@@ -424,12 +555,12 @@ def run_validation_pipeline(
         raise InterruptedError("Validation cancelled by user.")
 
     # -----------------------------------------------------------------------
-    # Stage 2: 4 Research Specialists in PARALLEL
+    # Stage 2: 4 Research Specialists in PARALLEL via MCP Tools
     # -----------------------------------------------------------------------
-    research_tasks = build_research_tasks(idea, coordinator_brief=coord_output)
+    t_parallel_0 = time.time()
+    research_tasks = build_research_tasks(clean_idea, coordinator_brief=state.coordinator_brief)
     research_keys = ["market", "competitor", "financial", "risk"]
 
-    # Signal frontend that all 4 research agents are starting in parallel
     for rkey in research_keys:
         info = AGENT_META_MAP[rkey]
         _emit({
@@ -440,14 +571,8 @@ def run_validation_pipeline(
             "message": info["start_msg"],
         })
 
-    t_parallel_start = time.time()
-    logger.info(
-        "[PARALLEL RESEARCH BATCH] Launching 4 research agents concurrently at timestamp=%.3f",
-        t_parallel_start,
-    )
     research_outputs = {}
     research_sources: dict[str, list[dict]] = {}
-    # Track which agents failed so Debate can be informed
     failed_agents: dict[str, str] = {}
 
     def _worker(rkey):
@@ -460,6 +585,8 @@ def run_validation_pipeline(
             agent_key=rkey,
             event_emitter=_emit,
             cancel_check=cancel_check,
+            monitoring_cb=monitoring_cb,
+            tracer=tracer,
         )
         _emit({
             "type": "agent_completed",
@@ -471,8 +598,6 @@ def run_validation_pipeline(
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(_worker, k): k for k in research_keys}
-
-        # Poll loop ensuring prompt cancellation responsiveness
         while not all(f.done() for f in futures):
             if cancel_check and cancel_check():
                 for f in futures:
@@ -480,24 +605,18 @@ def run_validation_pipeline(
                 raise InterruptedError("Validation cancelled by user.")
             time.sleep(0.1)
 
-        # Collect results — handle each future independently so one failure
-        # does NOT abort the remaining agents.
         for f, rkey in futures.items():
             try:
                 _, out, sources = f.result()
                 research_outputs[rkey] = out
                 research_sources[rkey] = sources
+                state.update_research_agent(rkey, out, sources)
             except InterruptedError:
-                # Propagate cancellation immediately
                 raise
             except Exception as exc:
                 err_msg = _safe_error_str(exc)
-                logger.error(
-                    "[PARALLEL RESEARCH] Agent '%s' failed: %s", rkey, err_msg
-                )
                 failed_agents[rkey] = err_msg
                 research_sources[rkey] = []
-                # Emit agent_error so frontend shows "Failed" instead of hanging
                 _emit({
                     "type": "agent_error",
                     "stage": "research",
@@ -507,29 +626,22 @@ def run_validation_pipeline(
                     "error": err_msg[:500],
                 })
 
-    t_parallel_end = time.time()
+    stage_durations["Parallel Research"] = time.time() - t_parallel_0
     successful = [k for k in research_keys if k not in failed_agents]
-    logger.info(
-        "[PARALLEL RESEARCH BATCH COMPLETE] %d/%d agents succeeded in %.2fs "
-        "(start=%.3f, end=%.3f). Failed: %s",
-        len(successful), len(research_keys),
-        t_parallel_end - t_parallel_start, t_parallel_start, t_parallel_end,
-        list(failed_agents.keys()) or "none",
-    )
 
-    # If ALL research agents failed, abort the pipeline — there is nothing to debate.
     if not successful:
-        raise RuntimeError(
-            "All research agents failed. Cannot proceed to Debate. "
-            f"Failures: { {k: v[:120] for k, v in failed_agents.items()} }"
-        )
+        state.fail("All research agents failed.")
+        raise RuntimeError("All research agents failed. Cannot proceed to Debate.")
 
     if cancel_check and cancel_check():
         raise InterruptedError("Validation cancelled by user.")
 
     # -----------------------------------------------------------------------
-    # Stage 3: Debate / Comparison Agent (starts only after all 4 finish)
+    # Stage 3: Comparator / Debate Agent (Cross-Verification)
     # -----------------------------------------------------------------------
+    t_debate_0 = time.time()
+    state.transition_to("DEBATING", note="Starting Comparator / Debate cross-verification.")
+
     _emit({
         "type": "agent_started",
         "stage": "debate",
@@ -538,14 +650,13 @@ def run_validation_pipeline(
         "message": AGENT_META_MAP["debate"]["start_msg"],
     })
 
-    # Build failure notes so Debate knows which agents didn't produce data
     def _agent_report(key):
         if key in failed_agents:
             return f"[DATA UNAVAILABLE — {AGENT_META_MAP[key]['name']} failed: {failed_agents[key][:200]}]"
         return research_outputs.get(key, "[No data returned]")
 
     debate_task = build_comparator_task(
-        idea,
+        clean_idea,
         market_report=_agent_report("market"),
         competitor_report=_agent_report("competitor"),
         financial_report=_agent_report("financial"),
@@ -557,7 +668,12 @@ def run_validation_pipeline(
         agent_key="debate",
         event_emitter=_emit,
         cancel_check=cancel_check,
+        monitoring_cb=monitoring_cb,
+        tracer=tracer,
     )
+    stage_durations["Debate & Cross-Verification"] = time.time() - t_debate_0
+    state.update_debate(debate_output)
+
     _emit({
         "type": "agent_completed",
         "stage": "debate",
@@ -565,32 +681,17 @@ def run_validation_pipeline(
         "agent_key": "debate",
     })
 
-    # Associate sources referenced during debate cross-verification
     debate_sources = list(debate_raw_sources)
-    debate_seen = {s.get("url") for s in debate_sources if s.get("url")}
-    for rk, r_list in research_sources.items():
-        for s in r_list:
-            u = s.get("url", "")
-            d = s.get("domain", "")
-            if u and u not in debate_seen:
-                if (u and u in debate_output) or (d and d in debate_output):
-                    debate_seen.add(u)
-                    debate_sources.append({
-                        "title": s.get("title", ""),
-                        "url": u,
-                        "domain": d,
-                        "snippet": s.get("snippet", ""),
-                        "supports": f"Referenced during debate cross-verification of {AGENT_META_MAP[rk]['name']} evidence.",
-                        "agent": AGENT_META_MAP["debate"]["name"],
-                        "agent_key": "debate",
-                    })
 
     if cancel_check and cancel_check():
         raise InterruptedError("Validation cancelled by user.")
 
     # -----------------------------------------------------------------------
-    # Stage 4: Investor Verdict Agent (starts only after Debate completes)
+    # Stage 4: Investor Verdict Agent (Structured Pydantic Output)
     # -----------------------------------------------------------------------
+    t_verdict_0 = time.time()
+    state.transition_to("VERDICT_EVALUATING", note="Investor Verdict Agent synthesizing final verdict.")
+
     _emit({
         "type": "agent_started",
         "stage": "verdict",
@@ -600,7 +701,7 @@ def run_validation_pipeline(
     })
 
     verdict_task = build_verdict_task(
-        idea,
+        clean_idea,
         market_report=_agent_report("market"),
         competitor_report=_agent_report("competitor"),
         financial_report=_agent_report("financial"),
@@ -613,7 +714,27 @@ def run_validation_pipeline(
         agent_key="verdict",
         event_emitter=_emit,
         cancel_check=cancel_check,
+        monitoring_cb=monitoring_cb,
+        tracer=tracer,
     )
+    stage_durations["Investor Verdict"] = time.time() - t_verdict_0
+
+    # Combine all verified sources
+    all_sources = []
+    seen_urls = set()
+    for s_list in [coord_sources, *research_sources.values(), debate_sources, verdict_raw_sources]:
+        for s in s_list:
+            u = s.get("url")
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                all_sources.append(s)
+
+    # Parse and validate structured Pydantic report
+    verdict_report = parse_to_verdict_report(verdict_output, sources=all_sources)
+    OutputGuardrail.validate_verdict(verdict_report.score, verdict_report.recommendation, verdict_report.justification)
+
+    state.update_verdict(verdict_report, raw_text=verdict_output)
+
     _emit({
         "type": "agent_completed",
         "stage": "verdict",
@@ -621,25 +742,25 @@ def run_validation_pipeline(
         "agent_key": "verdict",
     })
 
-    # Associate sources referenced in the final verdict investment thesis
-    verdict_sources = list(verdict_raw_sources)
-    verdict_seen = {s.get("url") for s in verdict_sources if s.get("url")}
-    for rk, r_list in research_sources.items():
-        for s in r_list:
-            u = s.get("url", "")
-            d = s.get("domain", "")
-            if u and u not in verdict_seen:
-                if (u and u in verdict_output) or (d and d in verdict_output):
-                    verdict_seen.add(u)
-                    verdict_sources.append({
-                        "title": s.get("title", ""),
-                        "url": u,
-                        "domain": d,
-                        "snippet": s.get("snippet", ""),
-                        "supports": f"Synthesized in final investment thesis from {AGENT_META_MAP[rk]['name']} evidence.",
-                        "agent": AGENT_META_MAP["verdict"]["name"],
-                        "agent_key": "verdict",
-                    })
+    # -----------------------------------------------------------------------
+    # Stage 5: End-to-End Performance, Cost & Runtime Evaluation
+    # -----------------------------------------------------------------------
+    prompt_chars = len(clean_idea) + len(coord_output) + sum(len(v) for v in research_outputs.values()) + len(debate_output)
+    output_chars = len(verdict_output)
+    performance_metrics = compute_performance_metrics(
+        session_id=session_id,
+        stage_durations=stage_durations,
+        total_prompt_chars=prompt_chars,
+        total_output_chars=output_chars,
+    )
+
+    # Finalize Langfuse / OTel trace
+    tracer.finalize_trace(verdict_summary={
+        "score": verdict_report.score,
+        "recommendation": verdict_report.recommendation,
+        "runtime_seconds": performance_metrics.total_duration_seconds,
+        "cost_inr": performance_metrics.cost.cost_inr,
+    })
 
     agent_sources = {
         "coordinator": coord_sources,
@@ -649,7 +770,7 @@ def run_validation_pipeline(
         "risk": research_sources.get("risk", []),
         "debate": debate_sources,
         "comparator": debate_sources,
-        "verdict": verdict_sources,
+        "verdict": all_sources,
     }
 
     agent_outputs = {
@@ -661,9 +782,15 @@ def run_validation_pipeline(
         "comparator": debate_output,
         "debate": debate_output,
         "verdict": verdict_output,
-        # Expose failure metadata so callers can surface it
         "_failed_agents": failed_agents,
         "_agent_sources": agent_sources,
+        # Enhanced State & Requirements integration objects
+        "_validation_state": state.to_summary_dict(),
+        "_verdict_report": verdict_report.model_dump(),
+        "_verdict_markdown": verdict_report.to_markdown(),
+        "_verdict_table": verdict_report.to_table(),
+        "_performance_metrics": performance_metrics.model_dump(),
+        "_performance_markdown": performance_metrics.to_markdown(),
     }
 
     return verdict_output, agent_outputs, agent_sources
@@ -676,5 +803,25 @@ def run_validation(idea: str) -> str:
 
 
 if __name__ == "__main__":
-    test_idea = "Portable EV battery health and degradation prediction device"
-    print(run_validation(test_idea))
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if len(sys.argv) > 1:
+        test_idea = " ".join(sys.argv[1:])
+    else:
+        try:
+            user_input = input("Enter your startup idea to validate: ").strip()
+            test_idea = user_input if user_input else "AI copilot for independent veterinary clinics with $99/mo subscription"
+        except (EOFError, KeyboardInterrupt):
+            test_idea = "AI copilot for independent veterinary clinics with $99/mo subscription"
+
+    _safe_print(f"\n============================================================")
+    _safe_print(f"VENTURELENS TERMINAL VALIDATION RUNNER")
+    _safe_print(f"Idea: {test_idea}")
+    _safe_print(f"============================================================\n")
+
+    verdict_text, outputs, sources = run_validation_pipeline(test_idea)
+
+    _safe_print("\n" + "=" * 60)
+    _safe_print(outputs.get("_verdict_markdown", verdict_text))
+    _safe_print("=" * 60)
+    _safe_print(outputs.get("_performance_markdown", ""))
