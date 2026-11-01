@@ -7,7 +7,7 @@
 export const API_BASE = 
   import.meta.env.VITE_API_URL || 
   (typeof window !== 'undefined' && window.localStorage.getItem('venturelens_api_url')) || 
-  'http://localhost:8000';
+  'https://venturelens-94tz.onrender.com';
 
 /**
  * Start the full 7-agent validation pipeline in the background.
