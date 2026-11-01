@@ -32,8 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 if sys.platform == "win32":
     local_storage = Path(__file__).resolve().parent / ".localappdata"
     local_storage.mkdir(parents=True, exist_ok=True)
-    if "LOCALAPPDATA" not in os.environ:
-        os.environ["LOCALAPPDATA"] = str(local_storage)
+    os.environ["LOCALAPPDATA"] = str(local_storage)
 
 from crewai import Crew
 from agents import (

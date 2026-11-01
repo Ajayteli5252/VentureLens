@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: venturelens-api
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: OMNIKEY_API_KEY
+        sync: false
+      - key: OMNIKEY_BASE_URL
+        sync: false
+      - key: MODEL_NAME
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false

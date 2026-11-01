@@ -36,6 +36,8 @@ jobs:
         working-directory: frontend
 
       - name: Build React application
+        env:
+          VITE_API_URL: ${{ vars.VITE_API_URL || secrets.VITE_API_URL }}
         run: |
           npm run build
           cp dist/index.html dist/404.html

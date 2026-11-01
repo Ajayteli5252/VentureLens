@@ -14,8 +14,7 @@ from pathlib import Path
 if sys.platform == "win32":
     local_storage = Path(__file__).resolve().parent / ".localappdata"
     local_storage.mkdir(parents=True, exist_ok=True)
-    if "LOCALAPPDATA" not in os.environ:
-        os.environ["LOCALAPPDATA"] = str(local_storage)
+    os.environ["LOCALAPPDATA"] = str(local_storage)
 
 from dotenv import load_dotenv
 from crewai import Agent, LLM

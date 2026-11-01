@@ -11,6 +11,7 @@ Run with:  uvicorn api:app --reload --port 8000
 """
 
 import json
+import os
 import re
 import sys
 import uuid
@@ -19,6 +20,12 @@ import logging
 import queue
 import threading
 from pathlib import Path
+
+# Windows credential path fix for sandboxed runtimes
+if sys.platform == "win32":
+    local_storage = Path(__file__).resolve().parent / ".localappdata"
+    local_storage.mkdir(parents=True, exist_ok=True)
+    os.environ["LOCALAPPDATA"] = str(local_storage)
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -1129,3 +1136,9 @@ def get_audit_logs(session_id: str):
         except Exception as e:
             logger.warning("Could not read trace logs: %s", e)
     return {"session_id": session_id, "trace_records": records, "count": len(records)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=False)
