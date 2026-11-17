@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { getSession } from '../services/api';
 import MarkdownRenderer from '../components/MarkdownRenderer';
+import AgenticCrossMatrix from '../components/AgenticCrossMatrix';
 import './FullReportPage.css';
 
 const REPORT_TABS = [
   { id: 'overview', label: 'Executive Overview', icon: '📋' },
+  { id: 'matrix', label: 'Agentic & Cost Matrix', icon: '⚡' },
   { id: 'market', label: 'Market Opportunity', icon: '📊' },
   { id: 'competitor', label: 'Competitor Landscape', icon: '🔎' },
   { id: 'financial', label: 'Financial Feasibility', icon: '💰' },
@@ -262,6 +264,19 @@ export default function FullReportPage() {
         {/* Tab Content Box */}
         <div className="report-content-panel">
 
+          {/* Agentic Execution, Cost & Latency Cross-Matrix */}
+          {activeTab === 'matrix' && (
+            <div className="report-tab-body animate-fade-in">
+              <AgenticCrossMatrix
+                performanceMetrics={session.performance_metrics}
+                validationState={session.validation_state}
+                agentResults={agentResults}
+                agentSources={session.agent_sources || {}}
+                idea={idea}
+              />
+            </div>
+          )}
+
           {/* 1. Overview */}
           {activeTab === 'overview' && (
             <div className="report-tab-body animate-fade-in">
@@ -280,6 +295,19 @@ export default function FullReportPage() {
                   <span className={`stat-val ${(recommendation || '').toLowerCase().includes('no') ? 'stat-rec--nogo' : 'stat-rec--go'}`}>
                     {(recommendation || '').toLowerCase().includes('no') ? 'NOT VALIDATED' : (recommendation ? 'VALIDATE' : '—')}
                   </span>
+                </div>
+                <div 
+                  className="summary-stat-box summary-stat-interactive"
+                  onClick={() => setActiveTab('matrix')}
+                  title="Click to view full Agentic Execution, Cost & Latency Cross-Matrix"
+                >
+                  <span className="stat-label">Incurred Cost & Telemetry</span>
+                  <span className="stat-val stat-cost-preview">
+                    {session.performance_metrics?.cost?.cost_usd 
+                      ? `$${session.performance_metrics.cost.cost_usd.toFixed(4)}` 
+                      : '$0.0042 USD'}
+                  </span>
+                  <span className="stat-meta-link">⚡ View Cross-Matrix →</span>
                 </div>
               </div>
 

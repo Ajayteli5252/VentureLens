@@ -226,9 +226,32 @@
 
 .overview-score-summary {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 16px;
   margin-bottom: 24px;
+}
+
+.summary-stat-interactive {
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.summary-stat-interactive:hover {
+  border-color: var(--accent-orange);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
+}
+
+.stat-cost-preview {
+  color: var(--success-green);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+.stat-meta-link {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-orange);
+  margin-top: 4px;
 }
 
 .summary-stat-box {
